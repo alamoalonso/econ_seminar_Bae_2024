@@ -105,15 +105,18 @@ cat("========================================\n")
 # Run main workflow
 results <- run_workflow(config)
 
-# Compute RMSE
+# Compute unified evaluation (RMSE + tests) - OPTIMIZED
+# This computes forecasts once and derives both RMSE and tests from same forecasts
 cat("\n")
-cat("Computing RMSE...\n")
-rmse_results <- compute_rmse(results, config)
+cat("Computing evaluation (RMSE + tests)...\n")
+evaluation <- compute_evaluation(results, config)
+rmse_results <- evaluation$rmse_results
+tests_results <- evaluation$tests_results
 
 # Save results
 cat("\n")
 cat("Saving results...\n")
-output_dir <- save_results(results, rmse_results, config)
+output_dir <- save_results(results, rmse_results, config, tests_results)
 
 # Generate plots
 cat("\n")
@@ -125,7 +128,7 @@ tryCatch({
 })
 
 # Print summary
-print_summary(results, rmse_results, config)
+print_summary(results, rmse_results, config, tests_results)
 
 cat("\n")
 cat(sprintf("Results saved to: %s\n", output_dir))

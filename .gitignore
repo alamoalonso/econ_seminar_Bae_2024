@@ -33,3 +33,6 @@ Thumbs.db
 # Keep specific files (override above patterns)
 !inst/extdata/*.csv
 !tests/testthat/fixtures/*.csv
+
+# Python virtual environments
+.venv/

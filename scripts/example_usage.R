@@ -35,11 +35,11 @@ cat("Example Usage of Factor Forecasting Framework\n")
 cat("==============================================\n\n")
 
 # ============================================================================
-# Example 1: Basic workflow with default US configuration
+# Example 1: Basic workflow with OPTIMIZED unified evaluation
 # ============================================================================
 
-cat("Example 1: Basic US workflow\n")
-cat("-----------------------------\n")
+cat("Example 1: Basic US workflow (OPTIMIZED)\n")
+cat("-----------------------------------------\n")
 
 # Create default configuration
 config <- config_us_default()
@@ -47,21 +47,43 @@ config <- config_us_default()
 # Optional: Customize for faster demo
 # config$series_list <- c("INDPRO", "CPIAUCSL")
 # config$horizons <- c(1, 12)
+# config$do_tests <- TRUE  # Enable forecast comparison tests
 
 # Run complete workflow
 cat("Running workflow...\n")
 results <- run_workflow(config)
 
-# Compute RMSE
-cat("Computing RMSE...\n")
-rmse_results <- compute_rmse(results, config)
+# Compute RMSE + tests in one pass (OPTIMIZED - computes forecasts only once)
+cat("Computing evaluation (RMSE + tests)...\n")
+evaluation <- compute_evaluation(results, config)
+rmse_results <- evaluation$rmse_results
+tests_results <- evaluation$tests_results
 
 # Display summary
-print_summary(results, rmse_results, config)
+print_summary(results, rmse_results, config, tests_results)
 
-# Save results
-output_dir <- save_results(results, rmse_results, config)
+# Save results (including tests_results.csv, table5_dm.csv, table5_cw.csv if category file provided)
+output_dir <- save_results(results, rmse_results, config, tests_results)
 
+cat("\n")
+
+# ============================================================================
+# Example 1b: LEGACY approach (less efficient - for backward compatibility)
+# ============================================================================
+
+cat("Example 1b: Legacy approach (computes forecasts twice)\n")
+cat("-------------------------------------------------------\n")
+
+# NOTE: This approach is less efficient than compute_evaluation()
+# Only use if you need RMSE or tests separately
+
+cat("Computing RMSE only (legacy)...\n")
+# rmse_results_legacy <- compute_rmse(results, config)
+
+cat("Computing tests only (legacy)...\n")
+# tests_results_legacy <- compute_tests(results, config)
+
+cat("Skipped for efficiency - use compute_evaluation() instead!\n")
 cat("\n")
 
 # ============================================================================

@@ -61,14 +61,15 @@ run_workflow <- function(config) {
 
 #' Save results to disk
 #'
-#' Saves RMSE tables and optional plots to the output directory.
+#' Saves RMSE tables, test results, Table 5 summaries, and optional plots to the output directory.
 #'
 #' @param results List returned from run_workflow()
 #' @param rmse_results Tibble with RMSE results
 #' @param config Configuration list
+#' @param tests_results Tibble with test results (optional)
 #' @export
 #' @importFrom readr write_csv
-save_results <- function(results, rmse_results, config) {
+save_results <- function(results, rmse_results, config, tests_results = NULL) {
   log_info("Saving results to disk", config)
 
   # Create output directory if needed
@@ -81,6 +82,40 @@ save_results <- function(results, rmse_results, config) {
   rmse_file <- file.path(output_dir, "rmse_results.csv")
   readr::write_csv(rmse_results, rmse_file)
   log_info(sprintf("RMSE results saved to: %s", rmse_file), config)
+
+  # Save test results if provided
+  if (!is.null(tests_results)) {
+    tests_file <- file.path(output_dir, "tests_results.csv")
+    readr::write_csv(tests_results, tests_file)
+    log_info(sprintf("Test results saved to: %s", tests_file), config)
+
+    # Generate Table 5 summaries if category mapping is available
+    if (!is.null(config$category_mapping_file) && file.exists(config$category_mapping_file)) {
+      tryCatch({
+        log_info("Generating Table 5 summaries", config)
+
+        # Generate DM table
+        if ("DM" %in% config$test_types) {
+          table5_dm <- summarise_table5(tests_results, config, test_type = "DM")
+          table5_dm_file <- file.path(output_dir, "table5_dm.csv")
+          readr::write_csv(table5_dm, table5_dm_file)
+          log_info(sprintf("Table 5 (DM) saved to: %s", table5_dm_file), config)
+        }
+
+        # Generate CW table
+        if ("CW" %in% config$test_types) {
+          table5_cw <- summarise_table5(tests_results, config, test_type = "CW")
+          table5_cw_file <- file.path(output_dir, "table5_cw.csv")
+          readr::write_csv(table5_cw, table5_cw_file)
+          log_info(sprintf("Table 5 (CW) saved to: %s", table5_cw_file), config)
+        }
+      }, error = function(e) {
+        log_warn(sprintf("Failed to generate Table 5 summaries: %s", e$message), config)
+      })
+    } else {
+      log_info("Skipping Table 5 generation: category_mapping_file not provided", config)
+    }
+  }
 
   # Save configuration
   config_file <- file.path(output_dir, "config.rds")
@@ -187,8 +222,9 @@ generate_plots <- function(rmse_results, config) {
 #' @param results List returned from run_workflow()
 #' @param rmse_results Tibble with RMSE results
 #' @param config Configuration list
+#' @param tests_results Tibble with test results (optional)
 #' @export
-print_summary <- function(results, rmse_results, config) {
+print_summary <- function(results, rmse_results, config, tests_results = NULL) {
   cat("\n")
   cat("========================================\n")
   cat("Forecasting Workflow Complete\n")
@@ -200,6 +236,12 @@ print_summary <- function(results, rmse_results, config) {
   cat(sprintf("Horizons: %s\n", paste(config$horizons, collapse = ", ")))
   cat(sprintf("Factor methods: %s\n", paste(config$factor_methods, collapse = ", ")))
   cat(sprintf("RMSE results: %d rows\n", nrow(rmse_results)))
+
+  if (!is.null(tests_results)) {
+    cat(sprintf("Test results: %d rows\n", nrow(tests_results)))
+    cat(sprintf("Test types: %s\n", paste(unique(tests_results$test_type), collapse = ", ")))
+  }
+
   cat("========================================\n")
   cat("\n")
 
@@ -207,4 +249,11 @@ print_summary <- function(results, rmse_results, config) {
   cat("Sample RMSE results (first 10 rows):\n")
   print(head(rmse_results, 10))
   cat("\n")
+
+  # Show a sample of test results if available
+  if (!is.null(tests_results)) {
+    cat("Sample test results (first 10 rows):\n")
+    print(head(tests_results, 10))
+    cat("\n")
+  }
 }

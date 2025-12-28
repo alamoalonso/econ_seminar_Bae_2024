@@ -17,7 +17,7 @@ config_us_default <- function() {
     dataset_id = "US_FRED",
 
     # File paths
-    data_file = "current.csv",
+    data_file = "data/fred-md/current.csv",
     output_dir = "outputs",
     run_id = format(Sys.time(), "%Y%m%d_%H%M%S"),
 
@@ -74,6 +74,17 @@ config_us_default <- function() {
     # Plotting
     make_plots = TRUE,  # Generate Bae-style figures when saving results
 
+    # Forecast comparison tests
+    do_tests = TRUE,  # Compute Diebold-Mariano and Clark-West tests
+    test_types = c("DM", "CW"),  # Test types to compute
+    test_alpha = c(0.10, 0.05, 0.01),  # Significance levels
+    hac_lag_rule = "h-1",  # HAC lag rule: "h-1" means L = max(h-1, 0)
+
+    # Table 5 settings
+    table5_factor_method = "PLS",  # Factor method for Table 5
+    table5_k = 1,  # Number of factors for Table 5
+    category_mapping_file = "data/fred-md/category_mappings.csv",
+
     # Compatibility mode (ensure exact replication)
     compatibility_mode = TRUE
   )
@@ -100,6 +111,8 @@ config_euro_default <- function() {
   cfg$apply_transforms <- FALSE
   
   cfg$first_forecast_idx <- 120
+  
+  cfg$category_mapping_file <- "data/ea-md-qd/2025-11/category_mappings.csv"
 
   cfg
 }
