@@ -1,0 +1,32 @@
+Package: FactorForecasting
+Type: Package
+Title: Factor-Based Forecasting with PCA and PLS
+Version: 0.1.0
+Authors@R:
+    person("Sebastian", "Alamo Alonso", email = "your.email@example.com", role = c("aut", "cre"))
+Description: A modular framework for factor-based forecasting using PCA and PLS.
+    Implements direct forecast models (DI, DIAR, DIAR-LAG) with rolling and recursive
+    estimation windows. Based on Bae (2024) methodology for macroeconomic forecasting.
+License: MIT + file LICENSE
+Encoding: UTF-8
+LazyData: true
+RoxygenNote: 7.2.3
+Depends:
+    R (>= 4.0.0)
+Imports:
+    fbi,
+    pls,
+    dplyr,
+    tibble,
+    tidyr,
+    readr,
+    ggplot2,
+    patchwork,
+    purrr,
+    lubridate,
+    stats
+Suggests:
+    testthat (>= 3.0.0),
+    knitr,
+    rmarkdown
+VignetteBuilder: knitr

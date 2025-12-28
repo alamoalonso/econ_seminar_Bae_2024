@@ -1,0 +1,210 @@
+#' Workflow Orchestration
+#'
+#' Top-level functions to run the complete forecasting workflow.
+#'
+#' @name workflow
+NULL
+
+#' Run complete forecasting workflow
+#'
+#' This is the main entry point for the entire forecasting pipeline.
+#' It loads data, preprocesses, extracts factors, runs forecasts, and returns results.
+#'
+#' @param config Configuration list (from config_us_default() or config_euro_default())
+#' @return A list with components:
+#'   - config: The configuration used
+#'   - dataset: The preprocessed dataset (panel_final, panel_std1, targets_list, etc.)
+#'   - rmse_results: Tibble with RMSE results (if compute_rmse = TRUE)
+#'   - run_timestamp: Character timestamp of the run
+#' @export
+#' @examples
+#' config <- config_us_default()
+#' results <- run_workflow(config)
+run_workflow <- function(config) {
+  log_info(paste(rep("=", 60), collapse = ""), config)
+  log_info("Starting forecasting workflow", config)
+  log_info(sprintf("Dataset: %s", config$dataset_id), config)
+  log_info(sprintf("Run ID: %s", config$run_id), config)
+  log_info(paste(rep("=", 60), collapse = ""), config)
+
+  # Validate configuration
+  validate_config(config)
+
+  # Step 1: Load dataset
+  log_info("Step 1: Loading dataset", config)
+  data <- load_dataset(config)
+
+  # Step 2: Preprocess dataset
+  log_info("Step 2: Preprocessing dataset", config)
+  dataset <- preprocess_dataset(data, config)
+
+  # Step 3: Construct targets
+  log_info("Step 3: Constructing h-step ahead targets", config)
+  dataset$targets_list <- construct_targets(dataset$panel_final, config$horizons)
+
+  log_info(sprintf("Targets constructed for %d series", length(dataset$targets_list)), config)
+
+  # Step 4: Run forecasts (via compute_rmse, which calls run_forecasts_for_series internally)
+  # This is done in compute_rmse() function
+
+  # Return results
+  results <- list(
+    config = config,
+    dataset = dataset,
+    run_timestamp = Sys.time()
+  )
+
+  log_info("Workflow data preparation complete", config)
+
+  results
+}
+
+#' Save results to disk
+#'
+#' Saves RMSE tables and optional plots to the output directory.
+#'
+#' @param results List returned from run_workflow()
+#' @param rmse_results Tibble with RMSE results
+#' @param config Configuration list
+#' @export
+#' @importFrom readr write_csv
+save_results <- function(results, rmse_results, config) {
+  log_info("Saving results to disk", config)
+
+  # Create output directory if needed
+  output_dir <- file.path(config$output_dir, config$run_id)
+  if (!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE)
+  }
+
+  # Save RMSE results
+  rmse_file <- file.path(output_dir, "rmse_results.csv")
+  readr::write_csv(rmse_results, rmse_file)
+  log_info(sprintf("RMSE results saved to: %s", rmse_file), config)
+
+  # Save configuration
+  config_file <- file.path(output_dir, "config.rds")
+  saveRDS(config, config_file)
+  log_info(sprintf("Configuration saved to: %s", config_file), config)
+
+  # Save summary statistics
+  summary_file <- file.path(output_dir, "summary.txt")
+  sink(summary_file)
+  cat("Forecasting Workflow Summary\n")
+  cat("============================\n\n")
+  cat(sprintf("Dataset: %s\n", config$dataset_id))
+  cat(sprintf("Run ID: %s\n", config$run_id))
+  cat(sprintf("Run timestamp: %s\n", results$run_timestamp))
+  cat(sprintf("Sample period: %s to %s\n", config$sample_start, config$sample_end))
+  cat(sprintf("Evaluation period: %s to %s\n", config$eval_start, config$eval_end))
+  cat(sprintf("Horizons: %s\n", paste(config$horizons, collapse = ", ")))
+  cat(sprintf("Factor methods: %s\n", paste(config$factor_methods, collapse = ", ")))
+  cat(sprintf("Number of series: %d\n", length(results$dataset$balanced_predictors)))
+  cat(sprintf("Number of observations: %d\n", nrow(results$dataset$panel_final)))
+  cat(sprintf("RMSE results: %d rows\n", nrow(rmse_results)))
+  cat("\n")
+  sink()
+  log_info(sprintf("Summary saved to: %s", summary_file), config)
+
+  # Generate Bae-style plots if requested
+  if (!is.null(config$make_plots) && config$make_plots) {
+    log_info("Generating Bae-style RMSE plots", config)
+
+    # Check if both PCA and PLS are in the results
+    if ("PCA" %in% rmse_results$factor_method) {
+      tryCatch({
+        plot_bae_fig1_kpca(rmse_results, metric = "rmse_rel", save_dir = output_dir)
+      }, error = function(e) {
+        log_warn(sprintf("Failed to generate PCA plot: %s", e$message), config)
+      })
+    }
+
+    if ("PLS" %in% rmse_results$factor_method) {
+      tryCatch({
+        plot_bae_fig2_kpls(rmse_results, metric = "rmse_rel", save_dir = output_dir)
+      }, error = function(e) {
+        log_warn(sprintf("Failed to generate PLS plot: %s", e$message), config)
+      })
+    }
+  }
+
+  log_info(sprintf("All results saved to: %s", output_dir), config)
+
+  invisible(output_dir)
+}
+
+#' Generate summary plots from RMSE results
+#'
+#' Creates diagnostic plots for the forecasting results.
+#'
+#' @param rmse_results Tibble with RMSE results
+#' @param config Configuration list
+#' @export
+#' @importFrom ggplot2 ggplot aes geom_line geom_point labs theme_minimal ggsave
+#' @importFrom dplyr filter group_by summarise
+generate_plots <- function(rmse_results, config) {
+  log_info("Generating summary plots", config)
+
+  output_dir <- file.path(config$output_dir, config$run_id)
+  if (!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE)
+  }
+
+  # Plot 1: Mean RMSE relative to AR across k for DIAR-LAG, h=1, recursive
+  fig_data <- rmse_results %>%
+    dplyr::filter(model == "DIAR-LAG", scheme == "recursive", h == 1) %>%
+    dplyr::group_by(factor_method, k) %>%
+    dplyr::summarise(mean_rmse_rel = mean(rmse_rel, na.rm = TRUE), .groups = "drop")
+
+  if (nrow(fig_data) > 0) {
+    p <- ggplot2::ggplot(fig_data,
+                         ggplot2::aes(x = k, y = mean_rmse_rel, group = factor_method)) +
+      ggplot2::geom_line(ggplot2::aes(linetype = factor_method)) +
+      ggplot2::geom_point(ggplot2::aes(shape = factor_method)) +
+      ggplot2::labs(
+        x = "Number of factors k",
+        y = "Mean RMSE relative to AR(BIC)",
+        linetype = "Factors",
+        shape    = "Factors",
+        title    = "DIAR-LAG, recursive, h = 1: PCA vs PLS"
+      ) +
+      ggplot2::theme_minimal()
+
+    plot_file <- file.path(output_dir, "diarlag_h1_recursive.png")
+    ggplot2::ggsave(plot_file, p, width = 8, height = 6)
+    log_info(sprintf("Plot saved to: %s", plot_file), config)
+  } else {
+    log_warn("No data available for DIAR-LAG plot", config)
+  }
+
+  # Additional plots can be added here
+
+  invisible(NULL)
+}
+
+#' Print workflow summary to console
+#'
+#' @param results List returned from run_workflow()
+#' @param rmse_results Tibble with RMSE results
+#' @param config Configuration list
+#' @export
+print_summary <- function(results, rmse_results, config) {
+  cat("\n")
+  cat("========================================\n")
+  cat("Forecasting Workflow Complete\n")
+  cat("========================================\n")
+  cat(sprintf("Dataset: %s\n", config$dataset_id))
+  cat(sprintf("Run ID: %s\n", config$run_id))
+  cat(sprintf("Series: %d\n", length(results$dataset$balanced_predictors)))
+  cat(sprintf("Observations: %d\n", nrow(results$dataset$panel_final)))
+  cat(sprintf("Horizons: %s\n", paste(config$horizons, collapse = ", ")))
+  cat(sprintf("Factor methods: %s\n", paste(config$factor_methods, collapse = ", ")))
+  cat(sprintf("RMSE results: %d rows\n", nrow(rmse_results)))
+  cat("========================================\n")
+  cat("\n")
+
+  # Show a sample of RMSE results
+  cat("Sample RMSE results (first 10 rows):\n")
+  print(head(rmse_results, 10))
+  cat("\n")
+}

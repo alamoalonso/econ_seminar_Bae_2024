@@ -1,0 +1,35 @@
+# R-specific
+.Rhistory
+.RData
+.Rproj.user
+*.Rproj
+env.RData
+
+# Output directories
+outputs/
+*.png
+*.pdf
+
+# Data files (keep local, don't commit large datasets)
+*.csv
+*.xlsx
+*.rds
+*.RDS
+
+# Temporary files
+*.tmp
+*.log
+*~
+
+# System files
+.DS_Store
+Thumbs.db
+.directory
+
+# IDE files
+.vscode/
+.idea/
+
+# Keep specific files (override above patterns)
+!inst/extdata/*.csv
+!tests/testthat/fixtures/*.csv

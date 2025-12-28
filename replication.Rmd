@@ -1,0 +1,996 @@
+---
+title: "Your Document Title"
+author: "Sebastian Alamo Alonso"
+date: "`r {Sys.setlocale('LC_TIME', 'en_US.UTF-8'); format(Sys.Date(), '%d %B %Y')}`"
+output: 
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    latex_engine: xelatex
+geometry: a4paper
+fontsize: 12pt
+lang: "en"
+---
+
+```{r echo=FALSE, include=FALSE}
+# Load libraries
+library(fbi)
+library(tidyverse)
+library(stats)
+library(pls)
+library(dplyr)
+library(tibble)
+```
+
+```{r}
+# Bae (2024): "Some variables are transformed to be stationary..."
+
+fred_transformed <- fredmd(file = "current.csv", transform = TRUE)
+
+fred_df <- as.data.frame(fred_transformed) # coerce to plain data.frame and strip 'fredmd' class
+class(fred_df) <- "data.frame"
+
+```
+
+```{r}
+# truncate dataset at 1959-03-01 (due to NAs after transform) and 2019-12-01 for replication purposes
+
+fred_df <- fred_df %>%
+  filter(date <= as.Date("2019-12-01")) %>%
+  filter(date >= as.Date("1959-03-01"))
+```
+
+```{r}
+# Bae (2024): "...Then, the transformed variables are standardized to have unit variance and mean zero..."
+
+X_raw   <- as.matrix(fred_df[, -1])   # predictors only
+dates   <- fred_df$date
+
+X_std   <- scale(X_raw)               # column-wise, NA-aware
+panel_std0 <- data.frame(date = dates, X_std)
+```
+
+```{r}
+# Bae (2024): "...Finally, the data are screened for outliers: Any observations whose values exceed ten times the interquartile range from the median are treated as missing values..."
+
+remove_outliers_10iqr <- function(x) {
+  med <- median(x, na.rm = TRUE)
+  iqr <- IQR(x, na.rm = TRUE)
+  # if iqr is zero or NA, do nothing
+  if (is.na(iqr) || iqr == 0) return(x)
+  
+  lower <- med - 10 * iqr
+  upper <- med + 10 * iqr
+  
+  x[x < lower | x > upper] <- NA
+  x
+}
+
+X_std_clean <- as.data.frame(lapply(panel_std0[, -1], remove_outliers_10iqr))
+panel_std1  <- data.frame(date = panel_std0$date, X_std_clean)
+```
+
+```{r}
+# Bae (2024): "...Factors are estimated only from the balanced panel with 108 predictors." -> balanced predictors = no NA
+
+predictor_matrix <- panel_std1[, -1]
+
+good_cols <- colnames(predictor_matrix)[
+  apply(predictor_matrix, 2, function(col) all(is.finite(col)))
+]
+
+cat("Balanced predictors:", length(good_cols), "\n")
+
+panel_final <- data.frame(
+  date = panel_std1$date,
+  predictor_matrix[, good_cols, drop = FALSE]
+)
+
+```
+
+```{r}
+# 
+construct_target <- function(x, h) {
+  n <- length(x)
+  out <- rep(NA_real_, n)
+  out[1:(n - h)] <- x[(1 + h):n]
+  out
+}
+
+horizons <- c(1, 6, 12, 24)
+targets_list <- list()
+
+for (j in 2:ncol(panel_final)) {
+  series_name <- names(panel_final)[j]
+  x <- panel_final[[j]]
+
+  targets_list[[series_name]] <- lapply(horizons, function(h) {
+    construct_target(x, h)
+  })
+  names(targets_list[[series_name]]) <- paste0("h", horizons)
+}
+```
+
+```{r}
+DEBUG_PLS <- FALSE   # set FALSE to silence
+DEBUG_ORIGINS <- c(60, 120, 240)  # a few t_idx values to inspect
+```
+
+
+```{r}
+
+extract_pca <- function(X, k_max = 12) {
+  # X: T x N, bereits standardisiert (mean 0, sd 1)
+  pca <- prcomp(X, center = TRUE, scale. = FALSE)
+  
+  # Scores: T x k_max
+  F_hat <- pca$x[, 1:k_max, drop = FALSE]
+  
+  # Loadings: N x k_max
+  loadings <- pca$rotation[, 1:k_max, drop = FALSE]
+  
+  list(F = F_hat, loadings = loadings)
+}
+
+extract_pls <- function(X, y, k_max = 12) {
+  df <- data.frame(y = y, X)
+  df_fit <- df[!is.na(df$y), , drop = FALSE]
+
+  if (nrow(df_fit) <= 2) stop("Zu wenige Beobachtungen für PLS an diesem Origin.")
+
+  # Key sanity checks on the training window
+  if (exists("DEBUG_PLS") && isTRUE(DEBUG_PLS)) {
+    y_sd <- sd(df_fit$y, na.rm = TRUE)
+    msg <- sprintf(
+      "[PLS] nrow(df_fit)=%d, ncol(X)=%d, k_max=%d, sd(y)=%.6f, anyNA(X_fit)=%s",
+      nrow(df_fit), ncol(X), k_max, y_sd, anyNA(df_fit[, -1, drop=FALSE])
+    )
+    message(msg)
+  }
+
+  pls_fit <- plsr(
+    y ~ .,
+    data   = df_fit,
+    ncomp  = min(k_max, ncol(X)),
+    center = TRUE,
+    scale  = FALSE,
+    method = "oscorespls"
+  )
+
+  # What did the model actually fit?
+  if (exists("DEBUG_PLS") && isTRUE(DEBUG_PLS)) {
+    message(sprintf(
+      "[PLS] pls_fit$ncomp=%s | dim(pls_fit$scores)=%s | dim(pls_fit$loading.weights)=%s",
+      paste0(pls_fit$ncomp, collapse=""),
+      paste(dim(pls_fit$scores), collapse="x"),
+      paste(dim(pls_fit$loading.weights), collapse="x")
+    ))
+  }
+
+  X_all <- df[, setdiff(names(df), "y"), drop = FALSE]
+  K <- min(k_max, ncol(X))
+  scores_arr <- predict(pls_fit, newdata = X_all, ncomp = 1:K, type = "scores")
+
+  if (DEBUG_PLS) {
+    message(sprintf("[PLS] requested ncomp = %s", paste(1:K, collapse=",")))
+    message(sprintf("[PLS] dim(scores_arr) = %s", paste(dim(scores_arr), collapse="x")))
+  }
+
+  # Convert to matrix deterministically
+  if (length(dim(scores_arr)) == 3) {
+    F_hat <- scores_arr[, , 1, drop = TRUE]
+  } else if (length(dim(scores_arr)) == 2) {
+    F_hat <- scores_arr
+  } else {
+    stop("Unerwartete Dimensionen der PLS-Scores.")
+  }
+  F_hat <- as.matrix(F_hat)
+
+  if (exists("DEBUG_PLS") && isTRUE(DEBUG_PLS)) {
+    message(sprintf("[PLS] dim(F_hat)=%s | ncol(F_hat)=%d | first-row=%s",
+                    paste(dim(F_hat), collapse="x"),
+                    ncol(F_hat),
+                    paste(round(F_hat[1, 1:min(5, ncol(F_hat))], 4), collapse=",")
+    ))
+  }
+
+  colnames(F_hat) <- paste0("F", seq_len(ncol(F_hat)))
+  list(F = F_hat, model = pls_fit)
+}
+
+
+```
+
+```{r}
+extract_factors_at_origin <- function(panel_final,
+                                      targets_list,
+                                      target_name,
+                                      h,
+                                      t_origin,
+                                      k_max_pca = 12,
+                                      k_max_pls = 12) {
+  # Zeitfenster bis t_origin
+  idx_win <- which(panel_final$date <= t_origin)
+  X_win   <- panel_final[idx_win, -1, drop = FALSE]
+  
+  # --- PCA ---
+  pca_out <- extract_pca(X_win, k_max = k_max_pca)
+  
+  # --- PLS ---
+  y_full <- targets_list[[target_name]][[paste0("h", h)]]
+  y_win  <- y_full[idx_win]
+  
+  pls_out <- extract_pls(X_win, y_win, k_max = k_max_pls)
+  
+  list(
+    pca = list(
+      F        = pca_out$F,        # length(idx_win) x k_pca
+      loadings = pca_out$loadings,
+      idx      = idx_win
+    ),
+    pls = list(
+      F     = pls_out$F,           # length(idx_win) x k_pls
+      model = pls_out$model,
+      idx   = idx_win
+    )
+  )
+}
+
+```
+
+```{r}
+compute_bic <- function(residuals, n, k_param) {
+  rss <- sum(residuals^2)
+  sigma2 <- rss / n
+  n * log(sigma2) + k_param * log(n)
+}
+```
+
+```{r}
+# DI
+
+build_design_DI <- function(y_h, F, k, sample_idx) {
+  # y_h: komplette h-Step-Targetreihe (Länge T)
+  # F:   Faktorenmatrix (T x Kmax)
+  
+  idx <- sample_idx[!is.na(y_h[sample_idx])]
+  if (length(idx) == 0) return(NULL)
+  
+  y <- y_h[idx]
+  X_f <- as.matrix(F[idx, 1:k, drop = FALSE])
+  
+  ok <- stats::complete.cases(cbind(y, X_f))
+  y <- y[ok]
+  X_f <- X_f[ok, , drop = FALSE]
+  
+  if (length(y) == 0) return(NULL)
+  
+  X <- cbind(Intercept = 1, X_f)
+  list(y = y, X = X)
+}
+
+fit_DI <- function(y_h, F, k, sample_idx) {
+  des <- build_design_DI(y_h, F, k, sample_idx)
+  if (is.null(des)) return(NULL)
+  
+  mod <- lm(des$y ~ des$X - 1)
+  list(model = mod)
+}
+
+predict_DI_at_origin <- function(fit_obj, F, t_idx, k) {
+  if (is.null(fit_obj)) return(NA_real_)
+  beta <- coef(fit_obj$model)
+  
+  # Intercept + erste k Faktoren
+  x <- c(Intercept = 1, as.numeric(F[t_idx, 1:k]))
+  if (length(beta) != length(x)) return(NA_real_)
+  
+  as.numeric(sum(x * beta))
+}
+```
+
+```{r}
+# DIAR
+
+build_design_DIAR <- function(y_h, y_base, F, k, p, sample_idx) {
+  # y_base: transformierte 1-Schritt-Reihe (aus panel_std1[, series_name])
+
+  max_lag <- p
+  idx <- sample_idx[sample_idx > max_lag & !is.na(y_h[sample_idx])]
+  if (length(idx) == 0) return(NULL)
+  
+  y <- y_h[idx]
+  X_f <- as.matrix(F[idx, 1:k, drop = FALSE])
+  
+  if (p > 0) {
+    X_ylags <- sapply(1:p, function(j) y_base[idx - j])
+    colnames(X_ylags) <- paste0("ylag", 1:p)
+    X_raw <- cbind(X_f, X_ylags)
+  } else {
+    X_raw <- X_f
+  }
+  
+  ok <- stats::complete.cases(cbind(y, X_raw))
+  y <- y[ok]
+  X_raw <- X_raw[ok, , drop = FALSE]
+  
+  if (length(y) == 0) return(NULL)
+  
+  X <- cbind(Intercept = 1, X_raw)
+  list(y = y, X = X)
+}
+
+fit_DIAR_BIC <- function(y_h, y_base, F, k, sample_idx, max_p = 6) {
+  best_bic <- Inf
+  best_res <- NULL
+  
+  for (p in 0:max_p) {
+    des <- build_design_DIAR(y_h, y_base, F, k, p, sample_idx)
+    if (is.null(des)) next
+    
+    mod <- lm(des$y ~ des$X - 1)
+    n <- length(des$y)
+    k_param <- ncol(des$X)
+    bic <- compute_bic(residuals(mod), n, k_param)
+    
+    if (bic < best_bic) {
+      best_bic <- bic
+      best_res <- list(model = mod, bic = bic, p = p, n = n)
+    }
+  }
+  
+  best_res
+}
+
+predict_DIARequation_at_origin <- function(fit_obj, F, y_base, t_idx, k) {
+  if (is.null(fit_obj)) return(NA_real_)
+  
+  p <- fit_obj$p
+  max_lag <- p
+  
+  # brauchen genug Vergangenheit für die y-Lags
+  if (t_idx <= max_lag) return(NA_real_)
+  
+  # Faktoren am Origin t_idx
+  X_f <- F[t_idx, 1:k, drop = FALSE]
+  
+  # y-Lags wie in build_design_DIAR
+  if (p > 0) {
+    y_lags <- sapply(1:p, function(j) y_base[t_idx - j])
+    X_ylags <- matrix(y_lags, nrow = 1)
+    colnames(X_ylags) <- paste0("ylag", 1:p)
+    X_raw <- cbind(X_f, X_ylags)
+  } else {
+    X_raw <- X_f
+  }
+  
+  if (any(!is.finite(c(X_raw)))) return(NA_real_)
+  
+  X_pred <- cbind(Intercept = 1, X_raw)
+  beta   <- coef(fit_obj$model)
+  
+  # Sicherheit: Länge anpassen, falls lm irgendetwas Komisches angehängt hat
+  if (length(beta) != ncol(X_pred)) {
+    beta <- beta[1:ncol(X_pred)]
+  }
+  
+  as.numeric(X_pred %*% beta)
+}
+
+```
+
+```{r}
+# DIAR-LAG
+
+build_design_DIARLAG <- function(y_h, y_base, F, k, p, m, sample_idx) {
+  # F: T x Kmax, wir nutzen die ersten k Spalten + m Lags davon
+
+  max_lag <- max(p, m)
+  idx <- sample_idx[sample_idx > max_lag & !is.na(y_h[sample_idx])]
+  if (length(idx) == 0) return(NULL)
+  
+  y <- y_h[idx]
+  
+  # Faktor-Lags
+  X_f_list <- list()
+  for (j in 0:m) {
+    Fj <- F[idx - j, 1:k, drop = FALSE]
+    colnames(Fj) <- paste0("F", 1:k, "_lag", j)
+    X_f_list[[j + 1]] <- Fj
+  }
+  X_f <- do.call(cbind, X_f_list)
+  
+  # y-Lags
+  if (p > 0) {
+    X_ylags <- sapply(1:p, function(j) y_base[idx - j])
+    colnames(X_ylags) <- paste0("ylag", 1:p)
+    X_raw <- cbind(X_f, X_ylags)
+  } else {
+    X_raw <- X_f
+  }
+  
+  ok <- stats::complete.cases(cbind(y, X_raw))
+  y <- y[ok]
+  X_raw <- X_raw[ok, , drop = FALSE]
+  
+  if (length(y) == 0) return(NULL)
+  
+  X <- cbind(Intercept = 1, X_raw)
+  list(y = y, X = X)
+}
+
+fit_DIARLAG_BIC <- function(y_h, y_base, F, k, sample_idx,
+                            max_p = 6, max_m = 3) {
+  if (k > 4) stop("DIAR-LAG erlaubt laut Bae (2024) maximal k = 4.")
+  
+  best_bic <- Inf
+  best_res <- NULL
+  
+  for (m in 1:max_m) {
+    for (p in 0:max_p) {
+      des <- build_design_DIARLAG(y_h, y_base, F, k, p, m, sample_idx)
+      if (is.null(des)) next
+      
+      mod <- lm(des$y ~ des$X - 1)
+      n <- length(des$y)
+      k_param <- ncol(des$X)
+      bic <- compute_bic(residuals(mod), n, k_param)
+      
+      if (bic < best_bic) {
+        best_bic <- bic
+        best_res <- list(model = mod, bic = bic, p = p, m = m, n = n)
+      }
+    }
+  }
+  
+  best_res
+}
+
+predict_DIARLAG_at_origin <- function(fit_obj, F, y_base, t_idx, k) {
+  if (is.null(fit_obj)) return(NA_real_)
+  
+  p <- fit_obj$p
+  m <- fit_obj$m
+  max_lag <- max(p, m)
+  
+  # brauchen genügend Historie für Faktor- und y-Lags
+  if (t_idx <= max_lag) return(NA_real_)
+  
+  # Faktor-Lags wie in build_design_DIARLAG
+  X_f_list <- list()
+  for (j in 0:m) {
+    Fj <- F[t_idx - j, 1:k, drop = FALSE]
+    colnames(Fj) <- paste0("F", 1:k, "_lag", j)
+    X_f_list[[j + 1]] <- Fj
+  }
+  X_f <- do.call(cbind, X_f_list)
+  
+  # y-Lags
+  if (p > 0) {
+    y_lags <- sapply(1:p, function(j) y_base[t_idx - j])
+    X_ylags <- matrix(y_lags, nrow = 1)
+    colnames(X_ylags) <- paste0("ylag", 1:p)
+    X_raw <- cbind(X_f, X_ylags)
+  } else {
+    X_raw <- X_f
+  }
+  
+  if (any(!is.finite(c(X_raw)))) return(NA_real_)
+  
+  X_pred <- cbind(Intercept = 1, X_raw)
+  beta   <- coef(fit_obj$model)
+  
+  if (length(beta) != ncol(X_pred)) {
+    beta <- beta[1:ncol(X_pred)]
+  }
+  
+  as.numeric(X_pred %*% beta)
+}
+
+```
+
+```{r}
+# Build AR(p) Designmatrix für gegebene Stichprobe
+build_design_AR <- function(y_h, y_base, p, sample_idx) {
+  # y_h: h-step Zielreihe, Länge T
+  # y_base: Basisreihe (transformierte Originalserie), Länge T
+  # p: Anzahl AR-Lags
+  # sample_idx: Indizes, die für die Schätzung genutzt werden sollen
+  
+  max_lag <- p
+  
+  # wir brauchen t > p, damit alle Lags definiert sind
+  idx <- sample_idx[sample_idx > max_lag & !is.na(y_h[sample_idx])]
+  if (length(idx) == 0) return(NULL)
+  
+  y <- y_h[idx]
+  
+  if (p > 0) {
+    X_ylags <- sapply(1:p, function(j) y_base[idx - j])
+    colnames(X_ylags) <- paste0("ylag", 1:p)
+    X_raw <- X_ylags
+  } else {
+    # p = 0 => nur Konstante
+    X_raw <- NULL
+  }
+  
+  if (!is.null(X_raw)) {
+    ok <- stats::complete.cases(cbind(y, X_raw))
+    y <- y[ok]
+    X_raw <- X_raw[ok, , drop = FALSE]
+  } else {
+    ok <- stats::complete.cases(y)
+    y <- y[ok]
+  }
+  
+  if (length(y) == 0) return(NULL)
+  
+  if (is.null(X_raw)) {
+    X <- matrix(1, nrow = length(y), ncol = 1)
+    colnames(X) <- "Intercept"
+  } else {
+    X <- cbind(Intercept = 1, X_raw)
+  }
+  
+  list(y = y, X = X)
+}
+
+fit_AR_BIC <- function(y_h, y_base, sample_idx, max_p = 6) {
+  best_bic <- Inf
+  best_res <- NULL
+  
+  for (p in 0:max_p) {
+    des <- build_design_AR(y_h, y_base, p, sample_idx)
+    if (is.null(des)) next
+    
+    mod <- lm(des$y ~ des$X - 1)
+    n <- length(des$y)
+    k_param <- ncol(des$X)
+    bic <- compute_bic(residuals(mod), n, k_param)
+    
+    if (bic < best_bic) {
+      best_bic <- bic
+      best_res <- list(
+        model = mod,
+        bic   = bic,
+        p     = p,
+        n     = n
+      )
+    }
+  }
+  
+  best_res
+}
+
+build_AR_row_for_origin <- function(y_base, t_index, p) {
+  if (p == 0) {
+    x_row <- c(Intercept = 1)
+  } else {
+    if (t_index <= p) return(NULL)
+    lags <- sapply(1:p, function(j) y_base[t_index - j])
+    if (any(!is.finite(lags))) return(NULL)
+    x_row <- c(Intercept = 1, setNames(lags, paste0("ylag", 1:p)))
+  }
+  matrix(x_row, nrow = 1)
+}
+
+predict_AR_at_origin <- function(fit_obj, y_base, t_index) {
+  if (is.null(fit_obj)) return(NA_real_)
+  p <- fit_obj$p
+  x_row <- build_AR_row_for_origin(y_base, t_index, p)
+  if (is.null(x_row)) return(NA_real_)
+  
+  beta <- coef(fit_obj$model)
+  as.numeric(x_row %*% beta)
+}
+```
+
+```{r}
+# Hilfsfunktionen
+
+# recursive window: 1 ... t
+get_recursive_idx <- function(t_idx) {
+  1:t_idx
+}
+
+# rolling 10 year window
+get_rolling_idx <- function(dates, t_idx) {
+  t_date <- dates[t_idx]
+  window_start <- t_date %m-% years(10)
+  which(dates >= window_start & dates <= t_date)
+}
+
+predict_factor_model_at_origin <- function(fit_obj, F, t_idx, k) {
+  if (is.null(fit_obj)) return(NA_real_)
+  
+  # Designzeile (Nur Faktoren)
+  x_row <- c(1, F[t_idx, 1:k])
+  
+  beta <- coef(fit_obj$model)
+  as.numeric(x_row %*% beta)
+}
+```
+
+```{r}
+run_forecasts_for_series <- function(series_name,
+                                     h,
+                                     dates,
+                                     panel_final,      # balanced predictors
+                                     panel_std1,       # für y_base
+                                     targets_list,
+                                     factor_method = c("PCA", "PLS"),
+                                     k_max_pca = 12,
+                                     k_max_pls = 12) {
+  
+  factor_method <- match.arg(factor_method)
+  
+  y_h    <- targets_list[[series_name]][[paste0("h", h)]]
+  y_base <- panel_std1[[series_name]]
+  
+  Tn <- length(y_h)
+  
+  # Forecast-Storage (pro Durchlauf nur EINE Factor-Methode)
+  k_max_common <- if (factor_method == "PCA") k_max_pca else k_max_pls
+  
+  out <- list(
+    truth    = rep(NA_real_, Tn),
+    DI_rec   = matrix(NA, Tn, k_max_common),
+    DI_roll  = matrix(NA, Tn, k_max_common),
+    DIAR_rec = matrix(NA, Tn, k_max_common),
+    DIAR_roll= matrix(NA, Tn, k_max_common),
+    DLAG_rec = matrix(NA, Tn, min(4, k_max_common)),
+    DLAG_roll= matrix(NA, Tn, min(4, k_max_common)),
+    AR_rec   = rep(NA_real_, Tn),
+    AR_roll  = rep(NA_real_, Tn)
+  )
+  
+  for (t_idx in 60:(Tn - h)) {
+  
+    # --- define true value ---
+    # y_h[t_idx] entspricht bereits y_{t_idx + h}
+    out$truth[t_idx] <- y_h[t_idx]
+    if (is.na(out$truth[t_idx])) next
+  
+    t_origin <- dates[t_idx]
+    
+    # --- Faktoren extrahieren ---
+    fcts <- extract_factors_at_origin(
+      panel_final  = panel_final,
+      targets_list = targets_list,
+      target_name  = series_name,
+      h            = h,
+      t_origin     = t_origin,
+      k_max_pca    = k_max_pca,
+      k_max_pls    = k_max_pls
+    )
+    
+    if (factor_method == "PCA") {
+      F_used <- fcts$pca$F
+    } else {
+      F_used <- fcts$pls$F
+    }
+    
+    if (exists("DEBUG_PLS") && isTRUE(DEBUG_PLS) && factor_method == "PLS" && t_idx %in% DEBUG_ORIGINS) {
+      message(sprintf(
+        "[RUN] t_idx=%d date=%s | dim(F_used)=%s | k_max_common=%d | k_max_used=%d",
+        t_idx, as.character(t_origin),
+        paste(dim(F_used), collapse="x"),
+        k_max_common, min(k_max_common, ncol(F_used))
+      ))
+    }
+
+    
+    # Sicherheit: nicht mehr k als Spalten vorhanden
+    k_max_used <- min(k_max_common, ncol(F_used))
+    
+    # --- sample indices ---
+    idx_rec  <- get_recursive_idx(t_idx)
+    idx_roll <- get_rolling_idx(dates, t_idx)
+    
+    # -------- AR(BIC) (unabhängig von Faktoren) --------
+    ar_fit_rec  <- fit_AR_BIC(y_h, y_base, idx_rec)
+    ar_fit_roll <- fit_AR_BIC(y_h, y_base, idx_roll)
+    
+    out$AR_rec[t_idx]  <- predict_AR_at_origin(ar_fit_rec,  y_base, t_idx)
+    out$AR_roll[t_idx] <- predict_AR_at_origin(ar_fit_roll, y_base, t_idx)
+    
+    # -------- DI --------
+    for (k in 1:k_max_used) {
+      di_fit_rec  <- fit_DI(y_h, F_used, k, idx_rec)
+      di_fit_roll <- fit_DI(y_h, F_used, k, idx_roll)
+      
+      if (!is.null(di_fit_rec))
+        out$DI_rec[t_idx, k] <- predict_DI_at_origin(di_fit_rec,  F_used, t_idx, k)
+      if (!is.null(di_fit_roll))
+        out$DI_roll[t_idx, k] <- predict_DI_at_origin(di_fit_roll, F_used, t_idx, k)
+    }
+    
+    # -------- DIAR --------
+    for (k in 1:k_max_used) {
+      diar_fit_rec  <- fit_DIAR_BIC(y_h, y_base, F_used, k, idx_rec,  max_p = 6)
+      diar_fit_roll <- fit_DIAR_BIC(y_h, y_base, F_used, k, idx_roll, max_p = 6)
+      
+      if (!is.null(diar_fit_rec))
+        out$DIAR_rec[t_idx, k] <- predict_DIARequation_at_origin(diar_fit_rec, F_used, y_base, t_idx, k)
+      if (!is.null(diar_fit_roll))
+        out$DIAR_roll[t_idx, k] <- predict_DIARequation_at_origin(diar_fit_roll, F_used, y_base, t_idx, k)
+    }
+    
+    # -------- DIAR-LAG (k ≤ 4) --------
+    for (k in 1:min(4, k_max_used)) {
+      dlag_fit_rec  <- fit_DIARLAG_BIC(y_h, y_base, F_used, k, idx_rec,  max_p = 6, max_m = 3)
+      dlag_fit_roll <- fit_DIARLAG_BIC(y_h, y_base, F_used, k, idx_roll, max_p = 6, max_m = 3)
+      
+      if (!is.null(dlag_fit_rec))
+        out$DLAG_rec[t_idx, k] <- predict_DIARLAG_at_origin(dlag_fit_rec, F_used, y_base, t_idx, k)
+      if (!is.null(dlag_fit_roll))
+        out$DLAG_roll[t_idx, k] <- predict_DIARLAG_at_origin(dlag_fit_roll, F_used, y_base, t_idx, k)
+    }
+  }
+  
+  out
+}
+
+
+```
+
+```{r}
+calc_mse <- function(truth, pred) {
+  ok <- is.finite(truth) & is.finite(pred)
+  if (!any(ok)) return(NA_real_)
+  mean((truth[ok] - pred[ok])^2)
+}
+```
+
+```{r}
+
+compute_rmse_for_scheme <- function(res,
+                                    dates,
+                                    scheme = c("recursive", "rolling"),
+                                    eval_start,
+                                    eval_end,
+                                    k_max_factor,
+                                    factor_method) {
+  scheme <- match.arg(scheme)
+  
+  if (scheme == "recursive") {
+    ar_pred   <- res$AR_rec
+    DI_mat    <- res$DI_rec
+    DIAR_mat  <- res$DIAR_rec
+    DLAG_mat  <- res$DLAG_rec
+  } else {
+    ar_pred   <- res$AR_roll
+    DI_mat    <- res$DI_roll
+    DIAR_mat  <- res$DIAR_roll
+    DLAG_mat  <- res$DLAG_roll
+  }
+  
+  idx_eval   <- which(dates >= eval_start & dates <= eval_end)
+  truth_eval <- res$truth[idx_eval]
+  
+  mse_ar <- calc_mse(truth_eval, ar_pred[idx_eval])
+  if (!is.finite(mse_ar)) {
+    warning("MSE(AR) ist NA/Inf in diesem Eval-Fenster.")
+    return(NULL)
+  }
+  
+  di_list <- lapply(1:k_max_factor, function(k) {
+    mse_k <- calc_mse(truth_eval, DI_mat[idx_eval, k])
+    tibble(
+      scheme      = scheme,
+      factor_method = factor_method,
+      model       = "DI",
+      k           = k,
+      mse         = mse_k,
+      mse_ar      = mse_ar,
+      rmse_rel    = mse_k / mse_ar
+    )
+  })
+  
+  diar_list <- lapply(1:k_max_factor, function(k) {
+    mse_k <- calc_mse(truth_eval, DIAR_mat[idx_eval, k])
+    tibble(
+      scheme      = scheme,
+      factor_method = factor_method,
+      model       = "DIAR",
+      k           = k,
+      mse         = mse_k,
+      mse_ar      = mse_ar,
+      rmse_rel    = mse_k / mse_ar
+    )
+  })
+  
+  dlag_list <- lapply(1:min(4, k_max_factor), function(k) {
+    mse_k <- calc_mse(truth_eval, DLAG_mat[idx_eval, k])
+    tibble(
+      scheme      = scheme,
+      factor_method = factor_method,
+      model       = "DIAR-LAG",
+      k           = k,
+      mse         = mse_k,
+      mse_ar      = mse_ar,
+      rmse_rel    = mse_k / mse_ar
+    )
+  })
+  
+  ar_row <- tibble(
+    scheme       = scheme,
+    factor_method = factor_method,
+    model        = "AR",
+    k            = NA_integer_,
+    mse          = mse_ar,
+    mse_ar       = mse_ar,
+    rmse_rel     = 1
+  )
+  
+  bind_rows(di_list, diar_list, dlag_list, ar_row) %>%
+    filter(is.finite(mse))
+}
+
+```
+
+```{r}
+compute_rmse_for_series_h <- function(series_name,
+                                      h,
+                                      dates,
+                                      panel_final,
+                                      panel_std1,
+                                      targets_list,
+                                      factor_method = c("PCA", "PLS"),
+                                      eval_start = as.Date("1970-01-01"),
+                                      eval_end   = as.Date("2019-12-01"),
+                                      k_max_pca  = 12,
+                                      k_max_pls  = 12) {
+  
+  factor_method <- match.arg(factor_method)
+  k_max_factor  <- if (factor_method == "PCA") k_max_pca else k_max_pls
+  
+  res <- run_forecasts_for_series(
+    series_name   = series_name,
+    h             = h,
+    dates         = dates,
+    panel_final   = panel_final,
+    panel_std1    = panel_std1,
+    targets_list  = targets_list,
+    factor_method = factor_method,
+    k_max_pca     = k_max_pca,
+    k_max_pls     = k_max_pls
+  )
+  
+  rec_tbl  <- compute_rmse_for_scheme(
+    res, dates, "recursive",
+    eval_start, eval_end,
+    k_max_factor = k_max_factor,
+    factor_method = factor_method
+  )
+  
+  roll_tbl <- compute_rmse_for_scheme(
+    res, dates, "rolling",
+    eval_start, eval_end,
+    k_max_factor = k_max_factor,
+    factor_method = factor_method
+  )
+  
+  bind_rows(rec_tbl, roll_tbl) %>%
+    mutate(
+      series = series_name,
+      h      = h,
+      .before = 1
+    )
+}
+
+
+```
+
+```{r}
+rmse_subset <- tibble()
+
+append_rmse_for_series <- function(rmse_store,
+                                   series_name,
+                                   factor_method = c("PCA", "PLS"),
+                                   horizons = c(1, 6, 12, 24),
+                                   dates,
+                                   panel_final,
+                                   panel_std1,
+                                   targets_list,
+                                   eval_start = as.Date("1970-01-01"),
+                                   eval_end   = as.Date("2019-12-01"),
+                                   k_max_pca  = 12,
+                                   k_max_pls  = 12) {
+  
+  factor_method <- match.arg(factor_method)
+  
+  res_series <- purrr::map_dfr(horizons, function(h) {
+    compute_rmse_for_series_h(
+      series_name   = series_name,
+      h             = h,
+      dates         = dates,
+      panel_final   = panel_final,
+      panel_std1    = panel_std1,
+      targets_list  = targets_list,
+      factor_method = factor_method,
+      eval_start    = eval_start,
+      eval_end      = eval_end,
+      k_max_pca     = k_max_pca,
+      k_max_pls     = k_max_pls
+    )
+  })
+  
+  dplyr::bind_rows(rmse_store, res_series)
+}
+
+```
+
+```{r}
+# compute rmse for a subset of variables
+# vars <- c("INDPRO","HWIURATIO","HOUST","CMRMTSPLx",
+#          "INVEST","AAA","CPIAUCSL","S.P.500")
+
+vars <- c("HWIURATIO","HOUST","CMRMTSPLx", "INVEST","AAA","CPIAUCSL","S.P.500")
+for (hor in c(1, 6, 12, 24)) {
+  for (fm in c("PCA", "PLS")) {
+    for (s in vars) {
+      rmse_subset <- append_rmse_for_series(
+        rmse_store   = rmse_subset,
+        series_name  = s,
+        factor_method = fm,
+        horizons     = hor,
+        dates        = panel_final$date,
+        panel_final  = panel_final,
+        panel_std1   = panel_std1,
+        targets_list = targets_list
+      )
+    }
+  }
+}
+```
+
+
+```{r}
+# compute rmse for all series
+
+series_vec <- names(targets_list)
+horizons   <- c(1, 6, 12, 24)
+
+rmse_all <- purrr::map_dfr(series_vec, function(s) {
+  purrr::map_dfr(horizons, function(h) {
+    compute_rmse_for_series_h(
+      series_name  = s,
+      h            = h,
+      dates        = panel_final$date,
+      panel_final  = panel_final,
+      panel_std1   = panel_std1,
+      targets_list = targets_list,
+      eval_start   = as.Date("1970-01-01"),
+      eval_end     = as.Date("2019-12-01"),
+      k_max_pca    = 12,
+      k_max_pls    = 12
+    )
+  })
+})
+
+```
+
+```{r}
+# Generate figures
+fig_diarlag_h1_rec <- rmse_subset %>%
+  filter(model  == "DIAR-LAG",
+         scheme == "recursive",
+         h      == 1) %>%
+  group_by(factor_method, k) %>%
+  summarise(mean_rmse_rel = mean(rmse_rel, na.rm = TRUE), .groups = "drop")
+
+ggplot(fig_diarlag_h1_rec,
+       aes(x = k, y = mean_rmse_rel, group = factor_method)) +
+  geom_line(aes(linetype = factor_method)) +
+  geom_point(aes(shape = factor_method)) +
+  labs(
+    x = "Number of factors k",
+    y = "Mean RMSE relative to AR(BIC)",
+    linetype = "Factors",
+    shape    = "Factors",
+    title    = "DIAR-LAG, recursive, h = 1: PCA vs PLS"
+  ) +
+  theme_minimal()
+```
