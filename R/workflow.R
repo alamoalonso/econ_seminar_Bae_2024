@@ -61,15 +61,19 @@ run_workflow <- function(config) {
 
 #' Save results to disk
 #'
-#' Saves RMSE tables, test results, Table 5 summaries, and optional plots to the output directory.
+#' Saves RMSE tables, test results, Table 5 summaries, forecasts, MCS results,
+#' and optional plots to the output directory.
 #'
 #' @param results List returned from run_workflow()
 #' @param rmse_results Tibble with RMSE results
 #' @param config Configuration list
 #' @param tests_results Tibble with test results (optional)
+#' @param forecasts Tibble with OOS forecasts at origin level for MCS analysis (optional)
+#' @param mcs_results Tibble with MCS evaluation results (optional)
 #' @export
 #' @importFrom readr write_csv
-save_results <- function(results, rmse_results, config, tests_results = NULL) {
+save_results <- function(results, rmse_results, config, tests_results = NULL,
+                         forecasts = NULL, mcs_results = NULL) {
   log_info("Saving results to disk", config)
 
   # Create output directory if needed
@@ -117,6 +121,49 @@ save_results <- function(results, rmse_results, config, tests_results = NULL) {
     }
   }
 
+  # Save forecasts if provided (for MCS analysis)
+  if (!is.null(forecasts) && nrow(forecasts) > 0) {
+    tryCatch({
+      if (requireNamespace("arrow", quietly = TRUE)) {
+        # Partitioned Parquet (efficient for large data, easy to query)
+        forecasts_dir <- file.path(output_dir, "forecasts")
+        arrow::write_dataset(
+          forecasts,
+          path = forecasts_dir,
+          format = "parquet",
+          partitioning = c("series_id", "h")
+        )
+        log_info(sprintf("Forecasts saved to: %s (partitioned parquet, %d rows)",
+                         forecasts_dir, nrow(forecasts)), config)
+      } else {
+        # Fallback to CSV if arrow not available
+        forecasts_file <- file.path(output_dir, "forecasts_long.csv")
+        readr::write_csv(forecasts, forecasts_file)
+        log_info(sprintf("Forecasts saved to: %s (%d rows)",
+                         forecasts_file, nrow(forecasts)), config)
+      }
+    }, error = function(e) {
+      log_warn(sprintf("Failed to save forecasts: %s", e$message), config)
+    })
+  }
+
+  # Save MCS results if provided
+  if (!is.null(mcs_results) && nrow(mcs_results) > 0) {
+    tryCatch({
+      if (requireNamespace("arrow", quietly = TRUE)) {
+        mcs_file <- file.path(output_dir, "mcs_results.parquet")
+        arrow::write_parquet(mcs_results, mcs_file)
+        log_info(sprintf("MCS results saved to: %s (%d rows)", mcs_file, nrow(mcs_results)), config)
+      } else {
+        mcs_file <- file.path(output_dir, "mcs_results.csv")
+        readr::write_csv(mcs_results, mcs_file)
+        log_info(sprintf("MCS results saved to: %s (%d rows)", mcs_file, nrow(mcs_results)), config)
+      }
+    }, error = function(e) {
+      log_warn(sprintf("Failed to save MCS results: %s", e$message), config)
+    })
+  }
+
   # Save configuration
   config_file <- file.path(output_dir, "config.rds")
   saveRDS(config, config_file)
@@ -137,6 +184,12 @@ save_results <- function(results, rmse_results, config, tests_results = NULL) {
   cat(sprintf("Number of series: %d\n", length(results$dataset$balanced_predictors)))
   cat(sprintf("Number of observations: %d\n", nrow(results$dataset$panel_final)))
   cat(sprintf("RMSE results: %d rows\n", nrow(rmse_results)))
+  if (!is.null(forecasts)) {
+    cat(sprintf("Forecasts saved: %d rows\n", nrow(forecasts)))
+  }
+  if (!is.null(mcs_results)) {
+    cat(sprintf("MCS results: %d rows\n", nrow(mcs_results)))
+  }
   cat("\n")
   sink()
   log_info(sprintf("Summary saved to: %s", summary_file), config)
@@ -148,7 +201,7 @@ save_results <- function(results, rmse_results, config, tests_results = NULL) {
     # Check if both PCA and PLS are in the results
     if ("PCA" %in% rmse_results$factor_method) {
       tryCatch({
-        plot_bae_fig1_kpca(rmse_results, metric = "rmse_rel", save_dir = output_dir)
+        plot_bae_fig1_kpca(rmse_results, metric = "rmse_rel", save_dir = output_dir, config = config)
       }, error = function(e) {
         log_warn(sprintf("Failed to generate PCA plot: %s", e$message), config)
       })
@@ -156,7 +209,7 @@ save_results <- function(results, rmse_results, config, tests_results = NULL) {
 
     if ("PLS" %in% rmse_results$factor_method) {
       tryCatch({
-        plot_bae_fig2_kpls(rmse_results, metric = "rmse_rel", save_dir = output_dir)
+        plot_bae_fig2_kpls(rmse_results, metric = "rmse_rel", save_dir = output_dir, config = config)
       }, error = function(e) {
         log_warn(sprintf("Failed to generate PLS plot: %s", e$message), config)
       })

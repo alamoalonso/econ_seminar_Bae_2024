@@ -113,10 +113,24 @@ evaluation <- compute_evaluation(results, config)
 rmse_results <- evaluation$rmse_results
 tests_results <- evaluation$tests_results
 
+# Compute MCS evaluation if enabled and forecasts are available
+mcs_results <- NULL
+if (isTRUE(config$mcs$enabled) && !is.null(evaluation$forecasts)) {
+  cat("\n")
+  cat("Computing MCS evaluation...\n")
+  tryCatch({
+    mcs_results <- compute_mcs_evaluation(evaluation$forecasts, config)
+  }, error = function(e) {
+    log_warn(sprintf("MCS evaluation failed: %s", e$message), config)
+  })
+}
+
 # Save results
 cat("\n")
 cat("Saving results...\n")
-output_dir <- save_results(results, rmse_results, config, tests_results)
+output_dir <- save_results(results, rmse_results, config, tests_results,
+                           forecasts = evaluation$forecasts,
+                           mcs_results = mcs_results)
 
 # Generate plots
 cat("\n")

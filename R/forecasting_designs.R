@@ -34,16 +34,31 @@ get_recursive_idx <- function(t_idx) {
   1:t_idx
 }
 
-#' Get rolling window indices (10-year window ending at t_idx)
+#' Get rolling window indices (observation-based window ending at t_idx)
+#'
+#' Computes a rolling window based on the config$rolling_window_years parameter
+#' and the data frequency. Converts the window from calendar years to observations.
 #'
 #' @param dates Vector of Date objects
 #' @param t_idx Current time index
+#' @param config Configuration list (must contain frequency and rolling_window_years)
 #' @return Integer vector of indices
 #' @export
-get_rolling_idx <- function(dates, t_idx) {
-  t_date <- dates[t_idx]
-  window_start <- t_date %m-% lubridate::years(10)
-  which(dates >= window_start & dates <= t_date)
+get_rolling_idx <- function(dates, t_idx, config) {
+  # Convert rolling_window_years to observations based on frequency
+  obs_per_year <- switch(config$frequency,
+    "monthly" = 12,
+    "quarterly" = 4,
+    "yearly" = 1,
+    stop(sprintf("Unknown frequency: %s. Must be 'monthly', 'quarterly', or 'yearly'.",
+                 config$frequency))
+  )
+
+  window_size_obs <- config$rolling_window_years * obs_per_year
+
+  # Use observation-based window (more robust than date arithmetic)
+  start_idx <- max(1, t_idx - window_size_obs + 1)
+  start_idx:t_idx
 }
 
 # ============================================================================

@@ -21,6 +21,9 @@ log_info <- function(msg, config = NULL) {
 #' @param config List containing debug flag
 #' @export
 log_warn <- function(msg, config = NULL) {
+  if (!is.null(config) && isTRUE(config$suppress_warnings)) {
+    return(invisible(NULL))
+  }
   timestamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
   cat(sprintf("[WARN %s] %s\n", timestamp, msg))
 }

@@ -18,6 +18,22 @@ export(extract_pca)
 export(extract_pls)
 export(extract_factors_at_origin)
 
+# Factor specs (mixed grid + dynamic k-selection)
+export(create_factor_spec)
+export(expand_factor_methods_to_specs)
+export(validate_factor_specs)
+export(get_factor_specs)
+export(get_max_k_for_method)
+export(has_dynamic_rule)
+export(filter_specs_by_method)
+export(print_factor_specs)
+
+# k-selection rules
+export(compute_bn_bic_k)
+export(compute_onatski_k)
+export(compute_cov_eigenvalues)
+export(select_k_dynamic)
+
 # Forecasting designs
 export(get_recursive_idx)
 export(get_rolling_idx)
@@ -33,10 +49,25 @@ export(predict_DIARLAG_at_origin)
 # Forecasting models
 export(run_forecasts_for_series)
 export(run_forecast_series)
+export(run_forecasts_for_spec)
+export(run_forecasts_for_all_specs)
 
 # Evaluation
 export(compute_rmse_for_series_h)
 export(compute_rmse)
+export(compute_evaluation)
+export(compute_evaluation_with_specs)
+export(compute_tests)
+export(build_mcs_loss_matrix)
+export(extract_forecasts_from_spec_res)
+
+# MCS (Model Confidence Set)
+export(run_mcs)
+export(compute_mcs_evaluation)
+export(resolve_method_specs)
+export(loss_se)
+export(loss_ae)
+export(select_k_bai_ng)
 
 # Plotting
 export(summarise_mean_rmse_by_k)

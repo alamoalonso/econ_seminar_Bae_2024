@@ -15,6 +15,8 @@ config_us_default <- function() {
   list(
     # Dataset identification
     dataset_id = "US_FRED",
+    frequency = "monthly",  # Data frequency: "monthly", "quarterly", or "yearly"
+                            # Used to convert rolling_window_years to observation count
 
     # File paths
     data_file = "data/fred-md/current.csv",
@@ -53,7 +55,7 @@ config_us_default <- function() {
     k_max_diarlag = 4,   # Max k for DIAR-LAG (as per Bae 2024)
 
     # Window settings
-    first_forecast_idx = 60,  # Start forecasting at t=60
+    first_forecast_idx = 120,  # Start forecasting at t=120
     rolling_window_years = 10,
 
     # Models to run
@@ -69,6 +71,7 @@ config_us_default <- function() {
 
     # Debug and logging
     debug = FALSE,
+    suppress_warnings = TRUE,  # Set FALSE to see WARN messages (e.g., Onatski k clamping)
     trace_origins = c(60, 120, 240),  # Time indices to trace for debugging
 
     # Plotting
@@ -86,7 +89,52 @@ config_us_default <- function() {
     category_mapping_file = "data/fred-md/category_mappings.csv",
 
     # Compatibility mode (ensure exact replication)
-    compatibility_mode = TRUE
+    compatibility_mode = TRUE,
+
+    # Forecast persistence for MCS analysis
+    save_forecasts = TRUE,  # Persist OOS forecasts at origin level for MCS tests
+
+    # Model Confidence Set (MCS) evaluation
+    mcs = list(
+      enabled = TRUE,  # Set to TRUE to run MCS tests
+      alphas = c(0.10, 0.05, 0.01),  # Significance levels for MCS
+      loss = "se",  # Loss function: "se" (squared error) or "ae" (absolute error)
+      test_stat = "TR",
+      B = 1000,  # Bootstrap replications
+      block_length = NULL,  # Block length for bootstrap (NULL = automatic)
+      seed = 42,  # Random seed for reproducibility
+      include_ar_in_M0 = TRUE,  # If TRUE, always include AR benchmark in MCS comparisons
+      # M0_sets: List of candidate method sets to compare
+      # Each set is a character vector of method_id patterns or special names:
+      # - "k1-PLS", "k1-PCA": PLS/PCA with k=1
+      # - "PLS-BNBIC", "PCA-BNBIC": BN-BIC selected k (placeholder)
+      # - Regex patterns like "recursive_PCA_DI_k[0-9]+" to match multiple methods
+      # Note: AR is automatically included if include_ar_in_M0 = TRUE
+      M0_sets = list(
+        baseline = c("k1-PLS", "k1-PCA")
+      )
+    ),
+
+    # Factor extraction specifications
+    # If NULL, will be auto-generated from factor_methods for backward compatibility
+    # Each spec defines: id, factor_method, k_mode ("grid"/"dynamic"), k_rule, k_max
+    # Example with both grid and dynamic methods:
+    # factor_specs = list(
+    #   list(id = "PCA_grid", factor_method = "PCA", k_mode = "grid", k_rule = NULL, k_max = 12),
+    #   list(id = "PLS_grid", factor_method = "PLS", k_mode = "grid", k_rule = NULL, k_max = 12),
+    #   list(id = "PCA_BNBIC", factor_method = "PCA", k_mode = "dynamic", k_rule = "bn_bic", k_max = 12),
+    #   list(id = "PLS_ON", factor_method = "PLS", k_mode = "dynamic", k_rule = "onatski", k_max = 12)
+    # ),
+    factor_specs = NULL,  # NULL = auto-generate grid specs from factor_methods
+
+    # k-selection settings (for dynamic rules)
+    k_selection_settings = list(
+      min_k = 1,                   # Minimum k allowed (enforced: k_hat >= 1)
+      bn_bic_sigma_sq = "v_kmax",  # How to compute sigma^2 in BIC3: "v_kmax"
+      onatski_r_max = 12,          # r_max for Onatski (auto-adjusted if constraint violated)
+      onatski_delta = "default",   # "default" uses max(N^{-2/5}, T^{-2/5})
+      fallback_on_error = "k_max"  # What to return if k-selection fails: "k_max" or "min_k"
+    )
   )
 }
 
@@ -102,6 +150,7 @@ config_euro_default <- function() {
 
   # Override for Euro Area
   cfg$dataset_id <- "EU_EA_MD_QD"
+  cfg$frequency <- "monthly"  # Update to "quarterly" if using quarterly data
   cfg$data_file <- "data/ea-md-qd/2025-11/data_TR2/EAdataM_TR2.xlsx"
   cfg$sample_start <- as.Date("2000-01-01")
   cfg$sample_end <- as.Date("2025-11-01")
@@ -154,6 +203,29 @@ validate_config <- function(config) {
   # Check k_max
   if (config$k_max_pca < 1 || config$k_max_pls < 1) {
     stop("k_max_pca and k_max_pls must be >= 1")
+  }
+
+  # Check frequency
+  if (!is.null(config$frequency)) {
+    valid_frequencies <- c("monthly", "quarterly", "yearly")
+    if (!config$frequency %in% valid_frequencies) {
+      stop(sprintf("frequency must be one of: %s (got: %s)",
+                   paste(valid_frequencies, collapse = ", "),
+                   config$frequency))
+    }
+  }
+
+  # Validate factor_specs if provided
+  if (!is.null(config$factor_specs)) {
+    validate_factor_specs(config$factor_specs)
+  }
+
+  # Validate k_selection_settings if provided
+  if (!is.null(config$k_selection_settings)) {
+    kss <- config$k_selection_settings
+    if (!is.null(kss$min_k) && (kss$min_k < 1 || kss$min_k != as.integer(kss$min_k))) {
+      stop("k_selection_settings$min_k must be a positive integer >= 1")
+    }
   }
 
   invisible(TRUE)

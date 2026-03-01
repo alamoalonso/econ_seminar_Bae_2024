@@ -100,6 +100,7 @@ plot_mean_rmse_kfactor <- function(rmse_tbl,
                                    models = c("DI", "DIAR", "DIAR-LAG"),
                                    horizons = c(1, 6, 12, 24),
                                    save_path = NULL,
+                                   series = NULL,
                                    width = 10,
                                    height = 9,
                                    dpi = 300) {
@@ -145,8 +146,11 @@ plot_mean_rmse_kfactor <- function(rmse_tbl,
   }
 
   # Create main title
-  main_title <- sprintf("Mean RMSE of k-%s", factor_method)
-
+  if (is.null(series)){
+    main_title <- sprintf("Mean RMSE of k-%s", factor_method)
+  } else {
+    main_title <- sprintf("Mean RMSE of k-%s for series %s", factor_method, series)
+  }
   # Create separate plots for each scheme to allow independent y-scales per model
   plot_list <- lapply(c("recursive", "rolling"), function(sch) {
     sch_label <- ifelse(sch == "recursive", "Recursive Estimation", "Rolling Estimation")
@@ -266,8 +270,28 @@ plot_bae_fig1_kpca <- function(rmse_tbl,
                                metric = "rmse_rel",
                                save_dir,
                                run_id = NULL,
-                               filename = NULL) {
-
+                               filename = NULL,
+                               config) {
+  
+  # Ensure config values exist
+  if (is.null(config$schemes)) {
+    sch <- c("recursive", "rolling")
+  } else {
+    sch <- config$schemes
+  }
+  
+  if (is.null(config$models)) {
+    mod <- c("DI", "DIAR", "DIAR-LAG")
+  } else {
+    mod <- config$models
+  }
+  
+  if (is.null(config$horizons)) {
+    hor <- c(1, 6, 12, 24)
+  } else {
+    hor <- config$horizons
+  }
+  
   # Construct filename
   if (is.null(filename)) {
     filename <- "fig1_mean_rmse_k_pca.png"
@@ -285,14 +309,41 @@ plot_bae_fig1_kpca <- function(rmse_tbl,
     rmse_tbl = rmse_tbl,
     factor_method = "PCA",
     metric = metric,
-    schemes = c("recursive", "rolling"),
-    models = c("DI", "DIAR", "DIAR-LAG"),
-    horizons = c(1, 6, 12, 24),
+    schemes = sch,
+    models = mod,
+    horizons = hor,
     save_path = save_path,
+    series = NULL,
     width = 10,
     height = 9,
     dpi = 300
   )
+  
+  # Generate sub-plots for all series
+  if(is.null(config$series_list)){
+    series <- unique(rmse_tbl$series)
+  } else {
+    series <- config$series_list
+  }
+  
+  for (s in series) {
+    filename_series <- sub("\\.png$", paste0("_", s, ".png"), filename)
+    save_path_series <- file.path(save_dir, filename_series)
+
+    plot_mean_rmse_kfactor(
+      rmse_tbl = rmse_tbl %>% filter(series == s),
+      factor_method = "PCA",
+      metric = metric,
+      schemes = sch,
+      models = mod,
+      horizons = hor,
+      save_path = save_path_series,
+      series = s,
+      width = 10,
+      height = 9,
+      dpi = 300
+    )
+  }
 }
 
 #' Plot Bae (2024) Figure 2: Mean RMSE of k-PLS
@@ -311,7 +362,27 @@ plot_bae_fig2_kpls <- function(rmse_tbl,
                                metric = "rmse_rel",
                                save_dir,
                                run_id = NULL,
-                               filename = NULL) {
+                               filename = NULL,
+                               config) {
+  
+  # Ensure config values exist
+  if (is.null(config$schemes)) {
+    sch <- c("recursive", "rolling")
+  } else {
+    sch <- config$schemes
+  }
+  
+  if (is.null(config$models)) {
+    mod <- c("DI", "DIAR", "DIAR-LAG")
+  } else {
+    mod <- config$models
+  }
+  
+  if (is.null(config$horizons)) {
+    hor <- c(1, 6, 12, 24)
+  } else {
+    hor <- config$horizons
+  }
 
   # Construct filename
   if (is.null(filename)) {
@@ -334,10 +405,37 @@ plot_bae_fig2_kpls <- function(rmse_tbl,
     models = c("DI", "DIAR", "DIAR-LAG"),
     horizons = c(1, 6, 12, 24),
     save_path = save_path,
+    series = NULL,
     width = 10,
     height = 9,
     dpi = 300
   )
+  
+  # Generate sub-plots for all series
+  if(is.null(config$series_list)){
+    series <- unique(rmse_tbl$series)
+  } else {
+    series <- config$series_list
+  }
+  
+  for (s in series) {
+    filename_series <- sub("\\.png$", paste0("_", s, ".png"), filename)
+    save_path_series <- file.path(save_dir, filename_series)
+
+    plot_mean_rmse_kfactor(
+      rmse_tbl = rmse_tbl %>% filter(series == s),
+      factor_method = "PLS",
+      metric = metric,
+      schemes = sch,
+      models = mod,
+      horizons = hor,
+      save_path = save_path_series,
+      series = s,
+      width = 10,
+      height = 9,
+      dpi = 300
+    )
+  }
 }
 
 #' Generate plots for an already-completed run
@@ -371,15 +469,21 @@ generate_plots_for_run <- function(run_dir,
     stop(sprintf("Run directory not found: %s", run_dir))
   }
 
-  # Check for rmse_results.csv
+  # Check for rmse_results.csv and config.rds
   rmse_file <- file.path(run_dir, "rmse_results.csv")
   if (!file.exists(rmse_file)) {
     stop(sprintf("rmse_results.csv not found in %s", run_dir))
   }
+  
+  config_file <- file.path(run_dir, "config.rds")
+  if (!file.exists(config_file)) {
+    stop(sprintf("config.rds not found in %s", run_dir))
+  }
 
-  # Load RMSE results
-  message(sprintf("Loading RMSE results from: %s", rmse_file))
+  # Load RMSE results and config
+  message(sprintf("Loading RMSE results and config from: %s", rmse_file))
   rmse_results <- readr::read_csv(rmse_file, show_col_types = FALSE)
+  config_run <- readRDS(config_file)
 
   # Determine output directory
   if (is.null(output_dir)) {
@@ -401,7 +505,8 @@ generate_plots_for_run <- function(run_dir,
       plot_bae_fig1_kpca(
         rmse_results,
         metric = metric,
-        save_dir = output_dir
+        save_dir = output_dir,
+        config = config_run
       )
       fig1_path <- file.path(output_dir, "fig1_mean_rmse_k_pca.png")
       plots_generated$fig1 <- fig1_path
@@ -420,7 +525,8 @@ generate_plots_for_run <- function(run_dir,
       plot_bae_fig2_kpls(
         rmse_results,
         metric = metric,
-        save_dir = output_dir
+        save_dir = output_dir,
+        config = config_run
       )
       fig2_path <- file.path(output_dir, "fig2_mean_rmse_k_pls.png")
       plots_generated$fig2 <- fig2_path
@@ -435,8 +541,8 @@ generate_plots_for_run <- function(run_dir,
   if (length(plots_generated) == 0) {
     warning("No plots were generated. Check that rmse_results.csv contains valid data.")
   } else {
-    message(sprintf("\nSuccessfully generated %d plot(s) in: %s",
-                    length(plots_generated), output_dir))
+    message(sprintf("\nSuccessfully generated plot(s) in: %s",
+                    output_dir))
   }
 
   invisible(plots_generated)

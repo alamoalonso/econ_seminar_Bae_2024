@@ -5,6 +5,11 @@
 #' @name evaluation
 NULL
 
+# Null-coalescing operator (define if not already available)
+if (!exists("%||%", mode = "function")) {
+  `%||%` <- function(x, y) if (is.null(x)) y else x
+}
+
 #' Compute MSE
 #'
 #' @param truth Numeric vector of true values
@@ -637,6 +642,781 @@ compute_tests <- function(results, config) {
   tests_all
 }
 
+# ============================================================================
+# Forecast Persistence for MCS Analysis
+# ============================================================================
+
+#' Extract OOS forecasts from run_forecasts_for_series() result
+#'
+#' Converts the matrix-based output to a tidy long-format data frame
+#' suitable for later loss computation and MCS analysis.
+#'
+#' @param res List from run_forecasts_for_series()
+#' @param dates Vector of Date objects
+#' @param series_id Character: series name
+#' @param h Integer: forecast horizon
+#' @param factor_method Character: "PCA" or "PLS"
+#' @param eval_start Date: start of evaluation window
+#' @param eval_end Date: end of evaluation window
+#' @param k_max_factor Integer: maximum k used
+#' @param run_id Character: run identifier
+#' @return Tibble with forecast rows (may be NULL if no valid forecasts)
+#' @importFrom tibble tibble
+#' @importFrom dplyr bind_rows mutate case_when
+extract_forecasts_from_res <- function(res, dates, series_id, h,
+                                        factor_method, eval_start, eval_end,
+                                        k_max_factor, run_id) {
+
+  # Determine valid indices (where truth exists and is non-NA)
+  valid_idx <- which(!is.na(res$truth))
+
+  # Intersect with evaluation window
+  eval_idx <- which(dates >= eval_start & dates <= eval_end)
+  idx_to_extract <- intersect(valid_idx, eval_idx)
+
+  if (length(idx_to_extract) == 0) return(NULL)
+
+  # Pre-allocate list for efficiency
+
+  rows_list <- vector("list")
+
+  for (scheme in c("recursive", "rolling")) {
+    ar_pred <- if (scheme == "recursive") res$AR_rec else res$AR_roll
+
+    # AR rows: factor_method = NA (will be deduped later)
+    for (t_idx in idx_to_extract) {
+      rows_list[[length(rows_list) + 1]] <- tibble::tibble(
+        run_id = run_id,
+        series_id = series_id,
+        h = h,
+        scheme = scheme,
+        factor_method = NA_character_,
+        model_class = "AR",
+        k = NA_integer_,
+        origin_index = t_idx,
+        origin_date = dates[t_idx],
+        target_index = t_idx + h,
+        target_date = dates[t_idx + h],
+        y_true = res$truth[t_idx],
+        y_hat = ar_pred[t_idx]
+      )
+    }
+
+    # DI and DIAR (1:k_max_factor)
+    for (model in c("DI", "DIAR")) {
+      mat <- switch(paste0(model, "_", scheme),
+        "DI_recursive" = res$DI_rec,
+        "DI_rolling" = res$DI_roll,
+        "DIAR_recursive" = res$DIAR_rec,
+        "DIAR_rolling" = res$DIAR_roll
+      )
+
+      for (k in 1:k_max_factor) {
+        for (t_idx in idx_to_extract) {
+          rows_list[[length(rows_list) + 1]] <- tibble::tibble(
+            run_id = run_id,
+            series_id = series_id,
+            h = h,
+            scheme = scheme,
+            factor_method = factor_method,
+            model_class = model,
+            k = k,
+            origin_index = t_idx,
+            origin_date = dates[t_idx],
+            target_index = t_idx + h,
+            target_date = dates[t_idx + h],
+            y_true = res$truth[t_idx],
+            y_hat = mat[t_idx, k]
+          )
+        }
+      }
+    }
+
+    # DIAR-LAG (1:min(4, k_max_factor))
+    mat <- if (scheme == "recursive") res$DLAG_rec else res$DLAG_roll
+    k_max_dlag <- min(4, k_max_factor)
+
+    for (k in 1:k_max_dlag) {
+      for (t_idx in idx_to_extract) {
+        rows_list[[length(rows_list) + 1]] <- tibble::tibble(
+          run_id = run_id,
+          series_id = series_id,
+          h = h,
+          scheme = scheme,
+          factor_method = factor_method,
+          model_class = "DIAR-LAG",
+          k = k,
+          origin_index = t_idx,
+          origin_date = dates[t_idx],
+          target_index = t_idx + h,
+          target_date = dates[t_idx + h],
+          y_true = res$truth[t_idx],
+          y_hat = mat[t_idx, k]
+        )
+      }
+    }
+  }
+
+  # Bind all rows at once (efficient)
+  result <- dplyr::bind_rows(rows_list)
+
+  # Add method_id
+  result <- result %>%
+    dplyr::mutate(
+      method_id = dplyr::case_when(
+        model_class == "AR" ~ paste(scheme, "AR", sep = "_"),
+        TRUE ~ paste(scheme, factor_method, model_class, paste0("k", k), sep = "_")
+      )
+    )
+
+  result
+}
+
+
+#' Extract OOS forecasts from run_forecasts_for_spec() result
+#'
+#' Converts the spec-based output to a tidy long-format data frame
+#' suitable for MCS analysis. Handles both grid and dynamic specs.
+#'
+#' @param res List from run_forecasts_for_spec()
+#' @param dates Vector of Date objects
+#' @param series_id Character: series name
+#' @param h Integer: forecast horizon
+#' @param eval_start Date: start of evaluation window
+#' @param eval_end Date: end of evaluation window
+#' @param run_id Character: run identifier
+#' @param first_forecast_idx Integer: first valid forecast index
+#' @return Tibble with forecast rows (may be NULL if no valid forecasts)
+#' @importFrom tibble tibble
+#' @importFrom dplyr bind_rows mutate case_when
+#' @export
+extract_forecasts_from_spec_res <- function(res, dates, series_id, h,
+                                             eval_start, eval_end, run_id,
+                                             first_forecast_idx = 60) {
+
+  spec_id <- res$spec_id
+  factor_method <- res$factor_method
+  k_mode <- res$k_mode
+  k_rule <- res$k_rule
+  k_max <- res$k_max
+
+  # Determine k_selection_rule string for output
+  k_selection_rule <- if (k_mode == "grid") "fixed" else k_rule
+
+  # Determine valid indices (where truth exists and is non-NA)
+  valid_idx <- which(!is.na(res$truth))
+
+  # Intersect with evaluation window
+  eval_idx <- which(dates >= eval_start & dates <= eval_end)
+  idx_to_extract <- intersect(valid_idx, eval_idx)
+
+  if (length(idx_to_extract) == 0) return(NULL)
+
+  # Pre-allocate list for efficiency
+  rows_list <- vector("list")
+
+  for (scheme in c("recursive", "rolling")) {
+    ar_pred <- if (scheme == "recursive") res$AR_rec else res$AR_roll
+
+    # AR rows: factor_spec_id = NA (will be deduped later)
+    for (t_idx in idx_to_extract) {
+      # Compute training window
+      training_start <- first_forecast_idx
+      training_end <- t_idx
+
+      rows_list[[length(rows_list) + 1]] <- tibble::tibble(
+        run_id = run_id,
+        series_id = series_id,
+        h = h,
+        scheme = scheme,
+        factor_method = NA_character_,
+        factor_spec_id = NA_character_,
+        k_mode = NA_character_,
+        k_selection_rule = "fixed",
+        model_class = "AR",
+        k = NA_integer_,
+        origin_index = t_idx,
+        origin_date = dates[t_idx],
+        target_index = t_idx + h,
+        target_date = if ((t_idx + h) <= length(dates)) dates[t_idx + h] else NA,
+        training_window_start = training_start,
+        training_window_end = training_end,
+        y_true = res$truth[t_idx],
+        y_hat = ar_pred[t_idx]
+      )
+    }
+
+    if (k_mode == "grid") {
+      # Grid mode: extract forecasts for k = 1..k_max
+      k_max_factor <- k_max
+
+      # DI and DIAR
+      for (model in c("DI", "DIAR")) {
+        mat <- switch(paste0(model, "_", scheme),
+          "DI_recursive" = res$DI_rec,
+          "DI_rolling" = res$DI_roll,
+          "DIAR_recursive" = res$DIAR_rec,
+          "DIAR_rolling" = res$DIAR_roll
+        )
+
+        for (k in 1:k_max_factor) {
+          for (t_idx in idx_to_extract) {
+            training_start <- first_forecast_idx
+            training_end <- t_idx
+
+            rows_list[[length(rows_list) + 1]] <- tibble::tibble(
+              run_id = run_id,
+              series_id = series_id,
+              h = h,
+              scheme = scheme,
+              factor_method = factor_method,
+              factor_spec_id = spec_id,
+              k_mode = k_mode,
+              k_selection_rule = k_selection_rule,
+              model_class = model,
+              k = k,
+              origin_index = t_idx,
+              origin_date = dates[t_idx],
+              target_index = t_idx + h,
+              target_date = if ((t_idx + h) <= length(dates)) dates[t_idx + h] else NA,
+              training_window_start = training_start,
+              training_window_end = training_end,
+              y_true = res$truth[t_idx],
+              y_hat = mat[t_idx, k]
+            )
+          }
+        }
+      }
+
+      # DIAR-LAG
+      mat <- if (scheme == "recursive") res$DLAG_rec else res$DLAG_roll
+      k_max_dlag <- min(4, k_max_factor)
+
+      for (k in 1:k_max_dlag) {
+        for (t_idx in idx_to_extract) {
+          training_start <- first_forecast_idx
+          training_end <- t_idx
+
+          rows_list[[length(rows_list) + 1]] <- tibble::tibble(
+            run_id = run_id,
+            series_id = series_id,
+            h = h,
+            scheme = scheme,
+            factor_method = factor_method,
+            factor_spec_id = spec_id,
+            k_mode = k_mode,
+            k_selection_rule = k_selection_rule,
+            model_class = "DIAR-LAG",
+            k = k,
+            origin_index = t_idx,
+            origin_date = dates[t_idx],
+            target_index = t_idx + h,
+            target_date = if ((t_idx + h) <= length(dates)) dates[t_idx + h] else NA,
+            training_window_start = training_start,
+            training_window_end = training_end,
+            y_true = res$truth[t_idx],
+            y_hat = mat[t_idx, k]
+          )
+        }
+      }
+
+    } else {
+      # Dynamic mode: single forecast per origin with k = k_hat
+      for (model in c("DI", "DIAR", "DIAR-LAG")) {
+        pred <- switch(paste0(model, "_", scheme),
+          "DI_recursive" = res$DI_rec,
+          "DI_rolling" = res$DI_roll,
+          "DIAR_recursive" = res$DIAR_rec,
+          "DIAR_rolling" = res$DIAR_roll,
+          "DIAR-LAG_recursive" = res$DLAG_rec,
+          "DIAR-LAG_rolling" = res$DLAG_roll
+        )
+
+        for (t_idx in idx_to_extract) {
+          # For DIAR-LAG, use k_hat_dlag (computed with k_max = 4)
+          # For DI/DIAR, use k_hat (computed with full k_max)
+          if (model == "DIAR-LAG") {
+            k_used <- res$k_hat_dlag[t_idx]
+          } else {
+            k_used <- res$k_hat[t_idx]
+          }
+
+          # Skip if k is NA or invalid
+          if (is.na(k_used)) next
+
+          training_start <- first_forecast_idx
+          training_end <- t_idx
+
+          rows_list[[length(rows_list) + 1]] <- tibble::tibble(
+            run_id = run_id,
+            series_id = series_id,
+            h = h,
+            scheme = scheme,
+            factor_method = factor_method,
+            factor_spec_id = spec_id,
+            k_mode = k_mode,
+            k_selection_rule = k_selection_rule,
+            model_class = model,
+            k = k_used,  # Actual k used at this origin
+            origin_index = t_idx,
+            origin_date = dates[t_idx],
+            target_index = t_idx + h,
+            target_date = if ((t_idx + h) <= length(dates)) dates[t_idx + h] else NA,
+            training_window_start = training_start,
+            training_window_end = training_end,
+            y_true = res$truth[t_idx],
+            y_hat = pred[t_idx]
+          )
+        }
+      }
+    }
+  }
+
+  # Bind all rows at once (efficient)
+  result <- dplyr::bind_rows(rows_list)
+
+  if (nrow(result) == 0) return(NULL)
+
+  # Add method_id: canonical identifier
+  # Format: {scheme}_{factor_spec_id}_{model_class}[_k{n}] for grid
+  # Format: {scheme}_{factor_spec_id}_{model_class} for dynamic
+  result <- result %>%
+    dplyr::mutate(
+      method_id = dplyr::case_when(
+        model_class == "AR" ~ paste(scheme, "AR", sep = "_"),
+        k_mode == "grid" ~ paste(scheme, factor_spec_id, model_class, paste0("k", k), sep = "_"),
+        TRUE ~ paste(scheme, factor_spec_id, model_class, sep = "_")
+      )
+    )
+
+  result
+}
+
+
+#' Compute unified evaluation with factor_specs support
+#'
+#' This function computes forecasts once and derives both RMSE and test results
+#' from the same forecast objects. Supports both grid and dynamic factor specs.
+#'
+#' @param results List of forecast results (from run_workflow)
+#' @param config Configuration list
+#' @return List with components:
+#'   - rmse_results: Tibble with RMSE results
+#'   - tests_results: Tibble with test results (NULL if do_tests = FALSE)
+#'   - forecasts: Tibble with OOS forecasts at origin level (NULL if save_forecasts = FALSE)
+#' @export
+#' @importFrom purrr map_dfr
+#' @importFrom dplyr bind_rows mutate filter distinct
+compute_evaluation_with_specs <- function(results, config) {
+  log_info("Computing unified evaluation (RMSE + tests) with factor_specs support", config)
+
+  # Extract dataset components from results
+  dataset <- results$dataset
+
+  # Get factor_specs (with backward compatibility)
+  factor_specs <- get_factor_specs(config)
+
+  # Determine which series to evaluate
+  if (is.null(config$series_list)) {
+    series_vec <- dataset$balanced_predictors
+  } else {
+    series_vec <- config$series_list
+  }
+
+  # Validate that all series exist in targets_list
+  available_series <- names(dataset$targets_list)
+  missing_series <- setdiff(series_vec, available_series)
+
+  if (length(missing_series) > 0) {
+    log_warn(sprintf(
+      "Skipping %d missing series: %s",
+      length(missing_series), paste(head(missing_series, 5), collapse = ", ")
+    ), config)
+    series_vec <- intersect(series_vec, available_series)
+  }
+
+  if (length(series_vec) == 0) {
+    stop("No valid series to evaluate after filtering.")
+  }
+
+  # Get evaluation parameters
+  test_types <- config$test_types %||% c("DM", "CW")
+  test_alpha <- config$test_alpha %||% c(0.10, 0.05, 0.01)
+  do_tests <- config$do_tests %||% TRUE
+  do_save_forecasts <- isTRUE(config$save_forecasts)
+
+  # Progress tracking
+  total_iterations <- length(series_vec) * length(config$horizons) * length(factor_specs)
+  current_iteration <- 0
+
+  # Initialize storage
+  rmse_list <- list()
+  tests_list <- list()
+  forecasts_list <- if (do_save_forecasts) list() else NULL
+
+  for (s in series_vec) {
+    for (h in config$horizons) {
+      for (spec in factor_specs) {
+        current_iteration <- current_iteration + 1
+        cat(sprintf("\rEvaluating: [%d/%d] Series: %s, h=%d, Spec: %s",
+                    current_iteration, total_iterations, s, h, spec$id))
+        flush.console()
+
+        # Run forecasts for this spec
+        res <- run_forecasts_for_spec(
+          series_name = s,
+          h = h,
+          dates = dataset$dates,
+          panel_final = dataset$panel_final,
+          panel_std1 = dataset$panel_std1,
+          targets_list = dataset$targets_list,
+          factor_spec = spec,
+          config = config
+        )
+
+        # Compute RMSE for this spec
+        rmse_chunk <- compute_rmse_for_spec(
+          res = res,
+          dates = dataset$dates,
+          eval_start = config$eval_start,
+          eval_end = config$eval_end,
+          series_name = s,
+          h = h
+        )
+        if (!is.null(rmse_chunk)) {
+          rmse_list[[length(rmse_list) + 1]] <- rmse_chunk
+        }
+
+        # Compute tests if requested
+        if (do_tests) {
+          tests_chunk <- compute_tests_for_spec(
+            res = res,
+            dates = dataset$dates,
+            eval_start = config$eval_start,
+            eval_end = config$eval_end,
+            series_name = s,
+            h = h,
+            test_types = test_types,
+            test_alpha = test_alpha
+          )
+          if (!is.null(tests_chunk)) {
+            tests_list[[length(tests_list) + 1]] <- tests_chunk
+          }
+        }
+
+        # Extract forecasts for MCS
+        if (do_save_forecasts) {
+          forecast_chunk <- extract_forecasts_from_spec_res(
+            res = res,
+            dates = dataset$dates,
+            series_id = s,
+            h = h,
+            eval_start = config$eval_start,
+            eval_end = config$eval_end,
+            run_id = config$run_id,
+            first_forecast_idx = config$first_forecast_idx %||% 60
+          )
+          if (!is.null(forecast_chunk)) {
+            forecasts_list[[length(forecasts_list) + 1]] <- forecast_chunk
+          }
+        }
+      }
+    }
+  }
+
+  cat("\n")
+
+  # Combine results
+  rmse_results <- dplyr::bind_rows(rmse_list)
+  tests_results <- if (length(tests_list) > 0) dplyr::bind_rows(tests_list) else NULL
+
+  # Process forecasts: bind and deduplicate AR rows
+  forecasts_all <- NULL
+  if (do_save_forecasts && length(forecasts_list) > 0) {
+    forecasts_all <- dplyr::bind_rows(forecasts_list)
+
+    # Deduplicate AR rows (AR is computed identically for each factor_spec)
+    ar_rows <- forecasts_all %>%
+      dplyr::filter(model_class == "AR")
+    non_ar_rows <- forecasts_all %>%
+      dplyr::filter(model_class != "AR")
+
+    # Keep only unique AR rows
+    ar_deduped <- ar_rows %>%
+      dplyr::distinct(run_id, series_id, h, scheme, origin_index, .keep_all = TRUE)
+
+    forecasts_all <- dplyr::bind_rows(ar_deduped, non_ar_rows)
+
+    log_info(sprintf("Forecasts collected: %d rows (after AR deduplication)",
+                     nrow(forecasts_all)), config)
+  }
+
+  log_info(sprintf("Evaluation complete: RMSE=%d rows, Tests=%d rows",
+                   nrow(rmse_results),
+                   if (!is.null(tests_results)) nrow(tests_results) else 0), config)
+
+  list(
+    rmse_results = rmse_results,
+    tests_results = tests_results,
+    forecasts = forecasts_all
+  )
+}
+
+
+#' Compute RMSE for a spec-based result
+#'
+#' @param res List from run_forecasts_for_spec()
+#' @param dates Vector of dates
+#' @param eval_start Date: start of evaluation
+#' @param eval_end Date: end of evaluation
+#' @param series_name Character: series name
+#' @param h Integer: horizon
+#' @return Tibble with RMSE results
+#' @keywords internal
+compute_rmse_for_spec <- function(res, dates, eval_start, eval_end, series_name, h) {
+
+  spec_id <- res$spec_id
+  factor_method <- res$factor_method
+  k_mode <- res$k_mode
+  k_rule <- res$k_rule
+  k_max <- res$k_max
+
+  # Evaluation window
+  idx_eval <- which(dates >= eval_start & dates <= eval_end)
+  truth_eval <- res$truth[idx_eval]
+
+  results <- list()
+
+  for (scheme in c("recursive", "rolling")) {
+    # AR benchmark
+    ar_pred <- if (scheme == "recursive") res$AR_rec else res$AR_roll
+    mse_ar <- calc_mse(truth_eval, ar_pred[idx_eval])
+
+    if (!is.finite(mse_ar)) next
+
+    # AR row
+    results[[length(results) + 1]] <- tibble::tibble(
+      series = series_name,
+      h = h,
+      scheme = scheme,
+      factor_method = NA_character_,
+      factor_spec_id = NA_character_,
+      k_mode = NA_character_,
+      k_selection_rule = "fixed",
+      model = "AR",
+      k = NA_integer_,
+      mse = mse_ar,
+      mse_ar = mse_ar,
+      rmse_rel = 1
+    )
+
+    if (k_mode == "grid") {
+      # Grid mode: compute for each k
+      for (model in c("DI", "DIAR", "DIAR-LAG")) {
+        k_max_model <- if (model == "DIAR-LAG") min(4, k_max) else k_max
+
+        for (k in 1:k_max_model) {
+          mat <- switch(paste0(model, "_", scheme),
+            "DI_recursive" = res$DI_rec,
+            "DI_rolling" = res$DI_roll,
+            "DIAR_recursive" = res$DIAR_rec,
+            "DIAR_rolling" = res$DIAR_roll,
+            "DIAR-LAG_recursive" = res$DLAG_rec,
+            "DIAR-LAG_rolling" = res$DLAG_roll
+          )
+
+          mse_k <- calc_mse(truth_eval, mat[idx_eval, k])
+
+          results[[length(results) + 1]] <- tibble::tibble(
+            series = series_name,
+            h = h,
+            scheme = scheme,
+            factor_method = factor_method,
+            factor_spec_id = spec_id,
+            k_mode = k_mode,
+            k_selection_rule = "fixed",
+            model = model,
+            k = k,
+            mse = mse_k,
+            mse_ar = mse_ar,
+            rmse_rel = mse_k / mse_ar
+          )
+        }
+      }
+    } else {
+      # Dynamic mode: aggregate MSE across all k_hat values
+      for (model in c("DI", "DIAR", "DIAR-LAG")) {
+        pred <- switch(paste0(model, "_", scheme),
+          "DI_recursive" = res$DI_rec,
+          "DI_rolling" = res$DI_roll,
+          "DIAR_recursive" = res$DIAR_rec,
+          "DIAR_rolling" = res$DIAR_roll,
+          "DIAR-LAG_recursive" = res$DLAG_rec,
+          "DIAR-LAG_rolling" = res$DLAG_roll
+        )
+
+        mse_dyn <- calc_mse(truth_eval, pred[idx_eval])
+
+        results[[length(results) + 1]] <- tibble::tibble(
+          series = series_name,
+          h = h,
+          scheme = scheme,
+          factor_method = factor_method,
+          factor_spec_id = spec_id,
+          k_mode = k_mode,
+          k_selection_rule = k_rule,
+          model = model,
+          k = NA_integer_,  # k varies by origin for dynamic
+          mse = mse_dyn,
+          mse_ar = mse_ar,
+          rmse_rel = mse_dyn / mse_ar
+        )
+      }
+    }
+  }
+
+  if (length(results) == 0) return(NULL)
+  dplyr::bind_rows(results) %>% dplyr::filter(is.finite(mse))
+}
+
+
+#' Compute forecast tests for a spec-based result
+#'
+#' @param res List from run_forecasts_for_spec()
+#' @param dates Vector of dates
+#' @param eval_start Date: start of evaluation
+#' @param eval_end Date: end of evaluation
+#' @param series_name Character: series name
+#' @param h Integer: horizon
+#' @param test_types Character vector: test types to compute
+#' @param test_alpha Numeric vector: significance levels
+#' @return Tibble with test results
+#' @keywords internal
+compute_tests_for_spec <- function(res, dates, eval_start, eval_end,
+                                    series_name, h, test_types, test_alpha) {
+
+  spec_id <- res$spec_id
+  factor_method <- res$factor_method
+  k_mode <- res$k_mode
+  k_rule <- res$k_rule
+  k_max <- res$k_max
+
+  # Evaluation window
+  idx_eval <- which(dates >= eval_start & dates <= eval_end)
+  truth_eval <- res$truth[idx_eval]
+
+  results <- list()
+
+  for (scheme in c("recursive", "rolling")) {
+    ar_pred <- if (scheme == "recursive") res$AR_rec else res$AR_roll
+    ar_eval <- ar_pred[idx_eval]
+
+    if (k_mode == "grid") {
+      # Grid mode: test each k
+      for (model in c("DI", "DIAR", "DIAR-LAG")) {
+        k_max_model <- if (model == "DIAR-LAG") min(4, k_max) else k_max
+
+        for (k in 1:k_max_model) {
+          mat <- switch(paste0(model, "_", scheme),
+            "DI_recursive" = res$DI_rec,
+            "DI_rolling" = res$DI_roll,
+            "DIAR_recursive" = res$DIAR_rec,
+            "DIAR_rolling" = res$DIAR_roll,
+            "DIAR-LAG_recursive" = res$DLAG_rec,
+            "DIAR-LAG_rolling" = res$DLAG_roll
+          )
+
+          f1_eval <- mat[idx_eval, k]
+
+          for (test_type in test_types) {
+            test_res <- forecast_test_one(truth_eval, ar_eval, f1_eval, h, test_type)
+
+            reject_cols <- list()
+            for (alpha in test_alpha) {
+              col_name <- paste0("reject_", gsub("\\.", "", sprintf("%.2f", alpha)))
+              reject_cols[[col_name]] <- !is.na(test_res$p_value_one_sided) &&
+                                          test_res$p_value_one_sided < alpha
+            }
+
+            row <- tibble::tibble(
+              series_id = series_name,
+              scheme = scheme,
+              factor_method = factor_method,
+              factor_spec_id = spec_id,
+              k_mode = k_mode,
+              k_selection_rule = "fixed",
+              model_class = model,
+              k = k,
+              h = h,
+              test_type = test_type,
+              stat = test_res$stat,
+              p_value_one_sided = test_res$p_value_one_sided,
+              n_oos = test_res$n_oos
+            )
+
+            for (col_name in names(reject_cols)) {
+              row[[col_name]] <- reject_cols[[col_name]]
+            }
+
+            results[[length(results) + 1]] <- row
+          }
+        }
+      }
+    } else {
+      # Dynamic mode: single test per model
+      for (model in c("DI", "DIAR", "DIAR-LAG")) {
+        pred <- switch(paste0(model, "_", scheme),
+          "DI_recursive" = res$DI_rec,
+          "DI_rolling" = res$DI_roll,
+          "DIAR_recursive" = res$DIAR_rec,
+          "DIAR_rolling" = res$DIAR_roll,
+          "DIAR-LAG_recursive" = res$DLAG_rec,
+          "DIAR-LAG_rolling" = res$DLAG_roll
+        )
+
+        f1_eval <- pred[idx_eval]
+
+        for (test_type in test_types) {
+          test_res <- forecast_test_one(truth_eval, ar_eval, f1_eval, h, test_type)
+
+          reject_cols <- list()
+          for (alpha in test_alpha) {
+            col_name <- paste0("reject_", gsub("\\.", "", sprintf("%.2f", alpha)))
+            reject_cols[[col_name]] <- !is.na(test_res$p_value_one_sided) &&
+                                        test_res$p_value_one_sided < alpha
+          }
+
+          row <- tibble::tibble(
+            series_id = series_name,
+            scheme = scheme,
+            factor_method = factor_method,
+            factor_spec_id = spec_id,
+            k_mode = k_mode,
+            k_selection_rule = k_rule,
+            model_class = model,
+            k = NA_integer_,
+            h = h,
+            test_type = test_type,
+            stat = test_res$stat,
+            p_value_one_sided = test_res$p_value_one_sided,
+            n_oos = test_res$n_oos
+          )
+
+          for (col_name in names(reject_cols)) {
+            row[[col_name]] <- reject_cols[[col_name]]
+          }
+
+          results[[length(results) + 1]] <- row
+        }
+      }
+    }
+  }
+
+  if (length(results) == 0) return(NULL)
+  dplyr::bind_rows(results)
+}
+
+
 #' Compute unified evaluation (RMSE + tests) with optimized forecast computation
 #'
 #' This function computes forecasts once and derives both RMSE and test results
@@ -647,9 +1427,10 @@ compute_tests <- function(results, config) {
 #' @return List with components:
 #'   - rmse_results: Tibble with RMSE results
 #'   - tests_results: Tibble with test results (NULL if do_tests = FALSE)
+#'   - forecasts: Tibble with OOS forecasts at origin level (NULL if save_forecasts = FALSE)
 #' @export
 #' @importFrom purrr map_dfr
-#' @importFrom dplyr bind_rows mutate
+#' @importFrom dplyr bind_rows mutate filter distinct
 compute_evaluation <- function(results, config) {
   log_info("Computing unified evaluation (RMSE + tests) for all series and horizons", config)
 
@@ -663,10 +1444,36 @@ compute_evaluation <- function(results, config) {
     series_vec <- config$series_list
   }
 
+  # Validate that all series exist in targets_list
+  available_series <- names(dataset$targets_list)
+  missing_series <- setdiff(series_vec, available_series)
+
+  if (length(missing_series) > 0) {
+    log_warn(sprintf(
+      "The following series were requested but not found in targets_list (likely removed during data cleaning): %s",
+      paste(missing_series, collapse = ", ")
+    ), config)
+    log_warn(sprintf(
+      "Skipping %d series. Continuing with %d available series.",
+      length(missing_series), length(series_vec) - length(missing_series)
+    ), config)
+
+    # Filter to only valid series
+    series_vec <- intersect(series_vec, available_series)
+  }
+
+  if (length(series_vec) == 0) {
+    stop("No valid series to evaluate after filtering. Check your data cleaning settings.")
+  }
+
   # Get test parameters from config
   test_types <- if (!is.null(config$test_types)) config$test_types else c("DM", "CW")
   test_alpha <- if (!is.null(config$test_alpha)) config$test_alpha else c(0.10, 0.05, 0.01)
   do_tests <- if (!is.null(config$do_tests)) config$do_tests else TRUE
+
+  # Get forecast persistence flag
+
+  do_save_forecasts <- isTRUE(config$save_forecasts)
 
   # Calculate total iterations for progress tracking
   total_iterations <- length(series_vec) * length(config$horizons) * length(config$factor_methods)
@@ -675,6 +1482,7 @@ compute_evaluation <- function(results, config) {
   # Initialize result storage
   rmse_list <- list()
   tests_list <- list()
+  forecasts_list <- if (do_save_forecasts) list() else NULL
 
   # Single unified loop - compute forecasts once per combination
   for (s in series_vec) {
@@ -765,6 +1573,26 @@ compute_evaluation <- function(results, config) {
             )
           tests_list[[length(tests_list) + 1]] <- tests_combined
         }
+
+        # ========================================
+        # EXTRACT FORECASTS FOR MCS PERSISTENCE
+        # ========================================
+        if (do_save_forecasts) {
+          forecast_chunk <- extract_forecasts_from_res(
+            res = res,
+            dates = dataset$dates,
+            series_id = s,
+            h = h,
+            factor_method = fm,
+            eval_start = config$eval_start,
+            eval_end = config$eval_end,
+            k_max_factor = k_max_factor,
+            run_id = config$run_id
+          )
+          if (!is.null(forecast_chunk)) {
+            forecasts_list[[length(forecasts_list) + 1]] <- forecast_chunk
+          }
+        }
       }
     }
   }
@@ -776,13 +1604,36 @@ compute_evaluation <- function(results, config) {
   rmse_results <- dplyr::bind_rows(rmse_list)
   tests_results <- if (length(tests_list) > 0) dplyr::bind_rows(tests_list) else NULL
 
+  # Process forecasts: bind and deduplicate AR rows
+  forecasts_all <- NULL
+  if (do_save_forecasts && length(forecasts_list) > 0) {
+    forecasts_all <- dplyr::bind_rows(forecasts_list)
+
+    # Deduplicate AR rows (AR is computed identically for each factor_method)
+    # AR rows have factor_method = NA, so they're duplicated across PCA/PLS iterations
+    ar_rows <- forecasts_all %>%
+      dplyr::filter(model_class == "AR")
+    non_ar_rows <- forecasts_all %>%
+      dplyr::filter(model_class != "AR")
+
+    # Keep only unique AR rows (by run_id, series_id, h, scheme, origin_index)
+    ar_deduped <- ar_rows %>%
+      dplyr::distinct(run_id, series_id, h, scheme, origin_index, .keep_all = TRUE)
+
+    forecasts_all <- dplyr::bind_rows(ar_deduped, non_ar_rows)
+
+    log_info(sprintf("Forecasts collected: %d rows (after AR deduplication)",
+                     nrow(forecasts_all)), config)
+  }
+
   log_info(sprintf("Unified evaluation complete: RMSE=%d rows, Tests=%d rows",
                    nrow(rmse_results),
                    if (!is.null(tests_results)) nrow(tests_results) else 0), config)
 
   list(
     rmse_results = rmse_results,
-    tests_results = tests_results
+    tests_results = tests_results,
+    forecasts = forecasts_all
   )
 }
 
@@ -900,4 +1751,111 @@ summarise_table5 <- function(tests_tbl, config, test_type = c("DM", "CW")) {
   }
 
   dplyr::bind_rows(results_list)
+}
+
+# ============================================================================
+# MCS Helper Functions
+# ============================================================================
+
+#' Build loss matrix for MCS from saved forecasts
+#'
+#' Loads persisted forecasts and constructs a loss matrix L suitable for
+#' Model Confidence Set (MCS) analysis. The matrix has dimensions (T_oos × M)
+#' where T_oos is the number of forecast origins and M is the number of methods.
+#'
+#' @param forecasts_path Path to forecasts_long.csv, forecasts_long.parquet,
+#'   or the forecasts/ directory (partitioned parquet)
+#' @param series_id Character: which series to filter
+#' @param h Integer: which horizon to filter
+#' @param loss_fn Function(y_true, y_hat) -> loss (default: squared error)
+#' @param methods_include Character vector of method_ids to include (NULL = all)
+#' @return List with:
+#'   - L: Matrix (T_oos × M) of losses, balanced panel (complete cases only)
+#'   - methods: Character vector of method names (column names of L)
+#'   - origin_dates: Date vector of forecast origins corresponding to rows
+#'   - n_dropped: Number of rows dropped due to NA in at least one method
+#'   - n_total: Total number of rows before dropping
+#' @export
+#' @importFrom dplyr filter mutate select
+#' @importFrom tidyr pivot_wider
+#' @importFrom stats complete.cases
+build_mcs_loss_matrix <- function(forecasts_path, series_id, h,
+                                   loss_fn = function(y, yhat) (y - yhat)^2,
+                                   methods_include = NULL) {
+
+  # Load forecasts based on path type
+  if (dir.exists(forecasts_path)) {
+    # Partitioned parquet directory
+    if (!requireNamespace("arrow", quietly = TRUE)) {
+      stop("Package 'arrow' is required to read partitioned parquet. Install with: install.packages('arrow')")
+    }
+    forecasts <- arrow::open_dataset(forecasts_path) %>%
+      dplyr::filter(series_id == !!series_id, h == !!h) %>%
+      dplyr::collect()
+  } else if (grepl("\\.parquet$", forecasts_path, ignore.case = TRUE)) {
+    # Single parquet file
+    if (!requireNamespace("arrow", quietly = TRUE)) {
+      stop("Package 'arrow' is required to read parquet files. Install with: install.packages('arrow')")
+    }
+    forecasts <- arrow::read_parquet(forecasts_path) %>%
+      dplyr::filter(series_id == !!series_id, h == !!h)
+  } else {
+    # CSV file
+    forecasts <- readr::read_csv(forecasts_path, show_col_types = FALSE) %>%
+      dplyr::filter(series_id == !!series_id, h == !!h)
+  }
+
+  if (nrow(forecasts) == 0) {
+    stop(sprintf("No forecasts found for series_id='%s', h=%d", series_id, h))
+  }
+
+  # Filter to specific methods if requested
+  if (!is.null(methods_include)) {
+    forecasts <- forecasts %>%
+      dplyr::filter(method_id %in% methods_include)
+  }
+
+  # Filter to rows with valid y_true and y_hat, then compute loss
+
+  df <- forecasts %>%
+    dplyr::filter(!is.na(y_true) & !is.na(y_hat)) %>%
+    dplyr::mutate(loss = loss_fn(y_true, y_hat)) %>%
+    dplyr::select(origin_index, origin_date, method_id, loss)
+
+  # Pivot to wide format: rows = origin_index, cols = method_id
+  L_wide <- df %>%
+    tidyr::pivot_wider(
+      id_cols = c(origin_index, origin_date),
+      names_from = method_id,
+      values_from = loss
+    ) %>%
+    dplyr::arrange(origin_index)
+
+  # Extract method columns (everything except origin_index and origin_date)
+  method_cols <- setdiff(names(L_wide), c("origin_index", "origin_date"))
+
+  # Apply complete cases filter (MCS requires balanced panel)
+  L_matrix_raw <- as.matrix(L_wide[, method_cols, drop = FALSE])
+  complete_mask <- stats::complete.cases(L_matrix_raw)
+
+  n_total <- nrow(L_wide)
+  n_dropped <- sum(!complete_mask)
+
+  if (n_dropped / n_total > 0.05) {
+    warning(sprintf(
+      "Dropped %d/%d rows (%.1f%%) due to NA in at least one method. MCS requires balanced panel.",
+      n_dropped, n_total, 100 * n_dropped / n_total
+    ))
+  }
+
+  L <- L_matrix_raw[complete_mask, , drop = FALSE]
+  origin_dates <- L_wide$origin_date[complete_mask]
+
+  list(
+    L = L,
+    methods = method_cols,
+    origin_dates = origin_dates,
+    n_dropped = n_dropped,
+    n_total = n_total
+  )
 }

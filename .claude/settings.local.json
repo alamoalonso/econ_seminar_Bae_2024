@@ -3,7 +3,11 @@
     "allow": [
       "Bash(tree:*)",
       "Bash(find:*)",
-      "Bash(Rscript:*)"
+      "Bash(Rscript:*)",
+      "WebFetch(domain:cran.r-universe.dev)",
+      "WebSearch",
+      "WebFetch(domain:rdrr.io)",
+      "Bash(where:*)"
     ]
   }
 }

@@ -9,6 +9,8 @@ A modular, package-like R framework for macroeconomic forecasting using factor m
 - **Multiple Forecasting Designs**: AR, DI, DIAR, DIAR-LAG models
 - **Rolling and Recursive Windows**: Both estimation schemes supported
 - **Forecast Comparison Tests**: Diebold-Mariano and Clark-West tests with HAC standard errors
+- **Model Confidence Set (MCS)**: Hansen-Lunde-Nason (2011) procedure for identifying superior models
+- **Forecast Persistence**: Origin-level OOS forecasts saved for post-hoc analysis and MCS
 - **Table 5 Replication**: Automatic generation of Bae (2024) Table 5 summaries
 - **Performance Optimized**: Unified evaluation computes forecasts only once (~40% faster)
 - **Configurable Workflows**: Easy-to-swap datasets and parameters via configuration system
@@ -20,14 +22,21 @@ A modular, package-like R framework for macroeconomic forecasting using factor m
 ```
 .
 ├── R/                          # Core R modules
-│   ├── config.R                # Configuration system
+│   ├── config.R                # Configuration system (factor_specs, k_selection_settings)
 │   ├── data_io.R               # Data loading functions
 │   ├── preprocessing.R         # Data transformation and cleaning
-│   ├── factors_pca.R           # PCA factor extraction
-│   ├── factors_pls.R           # PLS factor extraction
-│   ├── forecasting_designs.R  # Model building/fitting/prediction (AR, DI, DIAR, DIAR-LAG)
-│   ├── forecasting_models.R   # High-level forecast orchestration
-│   ├── evaluation.R            # RMSE, DM/CW tests, and unified evaluation
+│   ├── factors_pca.R           # PCA factor extraction (library-based)
+│   ├── factors_pls.R           # PLS factor extraction (library-based)
+│   ├── paper_factors_pca.R     # Paper-compliant PCA (Bae 2024 normalization)
+│   ├── paper_factors_pls.R     # Paper-compliant PLS
+│   ├── factor_specs.R          # Factor spec creation and validation
+│   ├── k_selection.R           # BN-BIC and Onatski k-selection rules
+│   ├── factor_cache.R          # Per-origin caching for efficient extraction
+│   ├── forecasting_designs.R   # Model building/fitting/prediction (AR, DI, DIAR, DIAR-LAG)
+│   ├── forecasting_models.R    # High-level forecast orchestration (grid + dynamic)
+│   ├── evaluation.R            # RMSE, DM/CW tests, forecast persistence, unified evaluation
+│   ├── mcs.R                   # Model Confidence Set (MCS) implementation
+│   ├── plots_rmse.R            # Bae-style RMSE plotting functions
 │   ├── workflow.R              # Top-level workflow orchestration
 │   └── utils_logging.R         # Logging utilities
 ├── scripts/
@@ -36,6 +45,10 @@ A modular, package-like R framework for macroeconomic forecasting using factor m
 │   └── validate_optimization.R # Validation script for performance optimization
 ├── inst/extdata/               # Optional: example config files, sample data
 ├── tests/testthat/             # Unit and smoke tests
+│   ├── test_smoke.R            # Integration tests
+│   ├── test_k_selection.R      # k-selection unit tests
+│   ├── test_factor_specs.R     # Factor specs unit tests
+│   └── ...
 ├── outputs/                    # Results output directory (created automatically)
 ├── DESCRIPTION                 # Package metadata
 ├── NAMESPACE                   # Package namespace
@@ -62,6 +75,12 @@ install.packages(c(
   "readxl",
   "janitor"
 ))
+
+# Optional: For efficient forecast persistence (parquet format)
+install.packages("arrow")
+
+# Recommended: For Model Confidence Set evaluation
+install.packages("MCS")
 ```
 
 ## Quick Start
@@ -81,8 +100,10 @@ This will:
 3. Extract PCA and PLS factors
 4. Run forecasts for all series and horizons
 5. Compute RMSE and forecast comparison tests (DM/CW) - **optimized to compute forecasts only once**
-6. Generate Table 5 summaries (if category mapping provided)
-7. Save results to `outputs/[timestamp]/`
+6. Save origin-level OOS forecasts for MCS analysis (default: enabled)
+7. Compute MCS evaluation (if `config$mcs$enabled = TRUE`)
+8. Generate Table 5 summaries (if category mapping provided)
+9. Save results to `outputs/[timestamp]/`
 
 ### Running from R Console
 
@@ -104,19 +125,30 @@ library(lubridate)
 config <- config_us_default()
 
 # Optional: Provide category mapping for Table 5 generation
-# config$category_mapping_file <- "data/category_mapping.csv"
+# config$category_mapping_file <- "data/fred-md/category_mappings.csv"
+
+# Optional: Enable MCS evaluation
+# config$mcs$enabled <- TRUE
 
 # Run workflow
 results <- run_workflow(config)
 
-# Compute evaluation (RMSE + tests) - OPTIMIZED
+# Compute evaluation (RMSE + tests + forecasts) - OPTIMIZED
 # This computes forecasts once and derives both RMSE and tests
 evaluation <- compute_evaluation(results, config)
 rmse_results <- evaluation$rmse_results
 tests_results <- evaluation$tests_results
+forecasts <- evaluation$forecasts  # Origin-level OOS forecasts
 
-# Save results (includes tests_results.csv, table5_dm.csv, table5_cw.csv)
-save_results(results, rmse_results, config, tests_results)
+# Optional: Compute MCS if enabled
+mcs_results <- NULL
+if (isTRUE(config$mcs$enabled) && !is.null(forecasts)) {
+  mcs_results <- compute_mcs_evaluation(forecasts, config)
+}
+
+# Save results (includes forecasts, MCS results, tests, Table 5)
+save_results(results, rmse_results, config, tests_results,
+             forecasts = forecasts, mcs_results = mcs_results)
 
 # Print summary
 print_summary(results, rmse_results, config, tests_results)
@@ -196,6 +228,18 @@ results <- run_workflow(config)
 - `table5_factor_method`: Factor method for Table 5 (default: "PLS")
 - `table5_k`: Number of factors for Table 5 (default: 1)
 - `category_mapping_file`: Path to CSV with series,category columns (required for Table 5)
+
+#### Forecast Persistence
+- `save_forecasts`: Persist OOS forecasts at origin level for MCS analysis (default: TRUE)
+
+#### Model Confidence Set (MCS)
+- `mcs$enabled`: Enable MCS evaluation (default: FALSE)
+- `mcs$alphas`: Significance levels (default: c(0.10, 0.05))
+- `mcs$loss`: Loss function - "se" (squared error) or "ae" (absolute error)
+- `mcs$test_stat`: Test statistic - "TR" (range) or "Tmax" (max)
+- `mcs$B`: Bootstrap replications (default: 1000)
+- `mcs$seed`: Random seed for reproducibility
+- `mcs$M0_sets`: Named list of candidate method sets to compare
 
 #### Debugging and Output
 - `debug`: Enable debug logging (TRUE/FALSE)
@@ -319,6 +363,142 @@ The workflow will automatically:
 
 **Important**: All series in your dataset must be present in the category mapping file, or Table 5 generation will fail with a clear error message.
 
+## Model Confidence Set (MCS)
+
+The framework integrates with the [MCS package](https://cran.r-project.org/package=MCS) (Catania & Bernardi) to implement the Hansen-Lunde-Nason (2011) Model Confidence Set procedure for identifying superior forecasting methods.
+
+**Important**: Install the MCS package for correct results: `install.packages("MCS")`
+
+### What is MCS?
+
+The Model Confidence Set is a sequential testing procedure that identifies a set of models that are statistically indistinguishable from the best model at a given significance level. Unlike pairwise tests (DM/CW), MCS provides:
+
+- **Multiple comparison correction**: Controls for the family-wise error rate
+- **Superior set identification**: Returns the set of models that cannot be rejected as inferior
+- **Bootstrap inference**: Uses block bootstrap with AR-based block length selection
+
+### Enabling MCS
+
+```r
+config <- config_us_default()
+
+# Enable MCS evaluation
+config$mcs$enabled <- TRUE
+
+# Configure MCS parameters
+config$mcs$alphas <- c(0.10, 0.05)  # Test at multiple significance levels
+config$mcs$loss <- "se"             # "se" (squared error) or "ae" (absolute error)
+config$mcs$test_stat <- "TR"        # "TR" (range statistic) or "Tmax" (max statistic)
+config$mcs$B <- 1000                # Bootstrap replications
+config$mcs$seed <- 42               # For reproducibility
+
+# Include AR benchmark in all MCS comparisons (default: TRUE)
+# When TRUE, AR is automatically added to each M0 comparison
+config$mcs$include_ar_in_M0 <- TRUE
+
+# Define candidate method sets to compare
+# Note: AR is automatically included if include_ar_in_M0 = TRUE
+config$mcs$M0_sets <- list(
+  # Compare k=1 factor methods (AR included automatically)
+  baseline = c("k1-PLS", "k1-PCA"),
+
+  # Compare all PCA-based methods (AR included automatically)
+  all_pca = c("k1-PCA", "k2-PCA", "k3-PCA", "k4-PCA")
+)
+
+# Run workflow
+results <- run_workflow(config)
+evaluation <- compute_evaluation(results, config)
+
+# Compute MCS
+mcs_results <- compute_mcs_evaluation(evaluation$forecasts, config)
+
+# Save all results
+save_results(results, evaluation$rmse_results, config, evaluation$tests_results,
+             forecasts = evaluation$forecasts, mcs_results = mcs_results)
+```
+
+**Note on slicing:** MCS tests are run separately for each forecast equation (model_class: DI, DIAR, DIAR-LAG). Within each slice, the specified factor methods are compared, and if `include_ar_in_M0 = TRUE`, the AR benchmark is included to test whether factor-based methods are statistically distinguishable from the benchmark.
+
+### Method Specification Syntax
+
+The `M0_sets` parameter accepts various method specifications:
+
+| Syntax | Description | Example Match |
+|--------|-------------|---------------|
+| `"AR"` | AR benchmark | `recursive_AR`, `rolling_AR` |
+| `"k1-PCA"` | PCA with k=1 factors | `recursive_PCA_DI_k1`, `rolling_PCA_DIAR_k1` |
+| `"k3-PLS"` | PLS with k=3 factors | `recursive_PLS_DI_k3`, `rolling_PLS_DIAR_k3` |
+| Regex pattern | Custom matching | `"recursive_PCA_.*_k[1-4]"` |
+
+### Interpreting MCS Results
+
+```r
+# Load MCS results
+mcs <- arrow::read_parquet("outputs/[run_id]/mcs_results.parquet")
+# Or: mcs <- read.csv("outputs/[run_id]/mcs_results.csv")
+
+# View superior sets at alpha = 0.10
+mcs %>%
+  filter(alpha == 0.10, status == "ok") %>%
+  select(series_id, h, scheme, M0_set_id, superior_set, n_methods_mcs)
+
+# Count how often each method is in the MCS
+library(tidyr)
+mcs %>%
+  filter(status == "ok") %>%
+  separate_rows(superior_set, sep = ";") %>%
+  count(superior_set, sort = TRUE)
+```
+
+### MCS Output Structure
+
+The `mcs_results.parquet` (or `.csv`) contains:
+
+| Column | Description |
+|--------|-------------|
+| `run_id`, `series_id`, `h`, `scheme`, `model_class` | Slice identifiers |
+| `alpha` | Significance level |
+| `M0_set_id` | Name of the candidate method set |
+| `loss` | Loss function used |
+| `test_stat` | Test statistic type |
+| `B` | Bootstrap replications |
+| `n_methods_input` | Number of methods in candidate set |
+| `n_methods_mcs` | Number of methods in the MCS |
+| `included_methods` | Semicolon-separated input methods |
+| `superior_set` | Semicolon-separated MCS members |
+| `pvalues` | Method=p-value pairs |
+| `status` | "ok", "skipped", or "error" |
+
+### Building Loss Matrices Manually
+
+For custom MCS analysis, you can build loss matrices from saved forecasts:
+
+```r
+# Build loss matrix for a specific series and horizon
+L_result <- build_mcs_loss_matrix(
+  forecasts_path = "outputs/[run_id]/forecasts",
+  series_id = "INDPRO",
+  h = 1,
+  loss_fn = function(y, yhat) (y - yhat)^2
+)
+
+# L_result contains:
+# - L: Matrix (T_oos x M) of losses
+# - methods: Vector of method names
+# - origin_dates: Dates for each row
+# - n_dropped: Rows dropped due to NA (MCS requires balanced panel)
+
+# Run MCS manually
+mcs_result <- run_mcs(L_result$L, alpha = 0.10, B = 1000, stat_type = "TR")
+print(mcs_result$superior_set)
+print(mcs_result$pvalues)
+```
+
+### References
+
+**Hansen, P. R., Lunde, A., & Nason, J. M. (2011)**. The Model Confidence Set. *Econometrica*, 79(2), 453-497.
+
 ## Performance Optimization
 
 The framework uses a **unified evaluation** approach that computes forecasts only once, then derives both RMSE and test statistics from the same forecast objects.
@@ -330,9 +510,12 @@ The framework uses a **unified evaluation** approach that computes forecasts onl
 evaluation <- compute_evaluation(results, config)
 rmse_results <- evaluation$rmse_results
 tests_results <- evaluation$tests_results
+forecasts <- evaluation$forecasts  # Origin-level OOS forecasts (if save_forecasts=TRUE)
 ```
 
 **Performance gain**: ~40% faster than computing RMSE and tests separately
+
+**Bonus**: When `save_forecasts = TRUE` (default), origin-level forecasts are collected for MCS analysis without recomputing.
 
 ### Legacy Approach (Backward Compatible)
 
@@ -414,15 +597,23 @@ Results are saved to `outputs/[run_id]/`:
 
 ```
 outputs/20231214_153045/
-├── rmse_results.csv           # Full RMSE table
-├── tests_results.csv          # Forecast comparison test results (DM/CW)
-├── table5_dm.csv              # Table 5 summary (Diebold-Mariano)
-├── table5_cw.csv              # Table 5 summary (Clark-West)
-├── config.rds                 # Configuration used for this run
-├── summary.txt                # Text summary of the run
-├── fig1_mean_rmse_k_pca.png   # PCA RMSE plot
-└── fig2_mean_rmse_k_pls.png   # PLS RMSE plot
+├── rmse_results.csv                    # Full RMSE table
+├── tests_results.csv                   # Forecast comparison test results (DM/CW)
+├── table5_dm.csv                       # Table 5 summary (Diebold-Mariano)
+├── table5_cw.csv                       # Table 5 summary (Clark-West)
+├── forecasts/                          # OOS forecasts for MCS analysis (partitioned parquet)
+│   └── series_id=INDPRO/h=1/...        # Partitioned by series and horizon
+├── config.rds                          # Configuration used for this run
+├── summary.txt                         # Text summary of the run
+├── fig1_mean_rmse_k_pca.png            # PCA RMSE plot (mean across all series)
+├── fig2_mean_rmse_k_pls.png            # PLS RMSE plot (mean across all series)
+├── fig1_mean_rmse_k_pca_INDPRO.png     # PCA RMSE plot for INDPRO series
+├── fig1_mean_rmse_k_pca_CPIAUCSL.png   # PCA RMSE plot for CPIAUCSL series
+├── fig2_mean_rmse_k_pls_INDPRO.png     # PLS RMSE plot for INDPRO series
+└── ...                                 # Additional series-specific plots
 ```
+
+**Note**: If the `arrow` package is not installed, forecasts are saved as `forecasts_long.csv` instead of partitioned parquet.
 
 ### RMSE Results Table
 
@@ -465,6 +656,53 @@ The `table5_dm.csv` and `table5_cw.csv` files replicate Bae (2024) Table 5, cont
 
 **Note**: Table 5 generation requires a category mapping file (see Category Mapping section below).
 
+### OOS Forecasts for MCS Analysis
+
+The `forecasts/` directory (or `forecasts_long.csv`) contains origin-level out-of-sample forecasts for Model Confidence Set (MCS) analysis:
+
+- `run_id`: Run identifier
+- `series_id`: Series name
+- `h`: Forecast horizon
+- `scheme`: "recursive" or "rolling"
+- `factor_method`: "PCA", "PLS", or NA (for AR model)
+- `model_class`: "AR", "DI", "DIAR", or "DIAR-LAG"
+- `k`: Number of factors (NA for AR)
+- `origin_index`: Time index at forecast origin
+- `origin_date`: Date at forecast origin
+- `target_index`: Time index of target realization (origin_index + h)
+- `target_date`: Date of target realization
+- `y_true`: Realized value
+- `y_hat`: Forecast value
+- `method_id`: Unique method identifier for MCS (e.g., "recursive_PCA_DI_k3")
+
+### MCS Results Table
+
+When MCS evaluation is enabled, `mcs_results.parquet` (or `.csv`) contains:
+
+- `run_id`, `series_id`, `h`, `scheme`, `model_class`: Slice identifiers
+- `alpha`: Significance level
+- `M0_set_id`: Name of the candidate method set
+- `loss`: Loss function used ("se" or "ae")
+- `test_stat`: Test statistic ("TR" or "Tmax")
+- `B`: Number of bootstrap replications
+- `n_methods_input`: Number of methods in the candidate set
+- `n_methods_mcs`: Number of methods in the Model Confidence Set
+- `included_methods`: Semicolon-separated list of input methods
+- `superior_set`: Semicolon-separated list of methods in the MCS
+- `pvalues`: Semicolon-separated list of method=p-value pairs
+- `status`: "ok", "skipped", or "error"
+- `message`: Status message
+
+See the [Model Confidence Set (MCS)](#model-confidence-set-mcs) section for configuration details.
+
+### Forecast Persistence Configuration
+
+```r
+config <- config_us_default()
+config$save_forecasts <- TRUE  # Default: persist forecasts for MCS
+config$save_forecasts <- FALSE # Disable to save disk space
+```
+
 ## Plotting
 
 The framework includes plotting functions to replicate the publication-quality figures from Bae (2024).
@@ -483,22 +721,33 @@ save_results(results, rmse_results, config)  # Plots saved automatically
 ```
 
 This will generate:
-- `fig1_mean_rmse_k_pca.png`: Mean RMSE of k-PCA across schemes and models
-- `fig2_mean_rmse_k_pls.png`: Mean RMSE of k-PLS across schemes and models
+- **Overall mean plots** (averaged across all series):
+  - `fig1_mean_rmse_k_pca.png`: Mean RMSE of k-PCA across schemes and models
+  - `fig2_mean_rmse_k_pls.png`: Mean RMSE of k-PLS across schemes and models
+- **Individual series plots** (one plot per series):
+  - `fig1_mean_rmse_k_pca_SERIESNAME.png`: k-PCA results for each specific series
+  - `fig2_mean_rmse_k_pls_SERIESNAME.png`: k-PLS results for each specific series
+  - Each plot has a dynamic title indicating the series name (e.g., "Mean RMSE of k-PCA for series INDPRO")
+  - The set of series plotted is controlled by `config$series_list` (defaults to all series if NULL)
 
 ### Manual Plot Generation
 
 Generate plots manually from existing RMSE results:
 
 ```r
-# Load existing results
+# Load existing results and config
 rmse_results <- read.csv("outputs/[run_id]/rmse_results.csv")
+config <- readRDS("outputs/[run_id]/config.rds")
 
-# Generate Bae-style figures
+# Generate Bae-style figures (generates both overall and per-series plots)
 output_dir <- "outputs/[run_id]"
-plot_bae_fig1_kpca(rmse_results, metric = "rmse_rel", save_dir = output_dir)
-plot_bae_fig2_kpls(rmse_results, metric = "rmse_rel", save_dir = output_dir)
+plot_bae_fig1_kpca(rmse_results, metric = "rmse_rel", save_dir = output_dir, config = config)
+plot_bae_fig2_kpls(rmse_results, metric = "rmse_rel", save_dir = output_dir, config = config)
 ```
+
+**Note**: These functions will generate:
+1. Overall mean plots averaged across all series
+2. Individual plots for each series specified in `config$series_list` (or all unique series in `rmse_results` if `config$series_list` is NULL)
 
 ### Generate Plots for Already-Completed Runs
 
@@ -678,6 +927,153 @@ forecasts <- run_forecasts_for_series(
 - Regression: y_{t+h} ~ const + F_t + F_{t-1} + ... + F_{t-m} + y_{t-1} + ... + y_{t-p}
 - Both p and m selected via BIC (max p=6, max m=3)
 
+## Factor Number Selection (k-Selection Rules)
+
+The framework supports both **fixed grid** (evaluate k=1..k_max) and **dynamic** (select k_hat per origin) factor number selection in the same workflow run.
+
+### Available Decision Rules
+
+| Rule | Method | Description |
+|------|--------|-------------|
+| **Fixed Grid** | PCA, PLS | Evaluate all k from 1 to k_max |
+| **BN-BIC** | PCA | Bai-Ng (2002) BIC3 criterion selects k_hat at each origin |
+| **Onatski** | PLS | Onatski (2010) eigenvalue edge detection selects k_hat at each origin |
+
+### Configuration
+
+#### Using Factor Specs (Recommended)
+
+Define explicit factor specifications to run both grid and dynamic methods in one workflow:
+
+```r
+config <- config_us_default()
+
+# Define mixed grid + dynamic specs
+config$factor_specs <- list(
+  # Grid methods: evaluate k = 1..k_max
+  create_factor_spec("PCA_grid", "PCA", "grid", NULL, 12),
+  create_factor_spec("PLS_grid", "PLS", "grid", NULL, 12),
+
+  # Dynamic methods: select k_hat(t) at each origin
+  create_factor_spec("PCA_BNBIC", "PCA", "dynamic", "bn_bic", 12),
+  create_factor_spec("PLS_ON", "PLS", "dynamic", "onatski", 12)
+)
+
+# k-selection settings
+config$k_selection_settings <- list(
+  min_k = 1,                   # Enforce k_hat >= 1 (no zero factors)
+  bn_bic_sigma_sq = "v_kmax",  # sigma^2 = V(k_max) for BIC3
+  onatski_r_max = 12           # r_max for Onatski edge detection
+)
+
+# Run workflow with mixed specs
+results <- run_workflow(config)
+evaluation <- compute_evaluation_with_specs(results, config)
+```
+
+#### Backward Compatibility
+
+If `factor_specs` is NULL, the framework auto-generates grid specs from `factor_methods`:
+
+```r
+config <- config_us_default()
+config$factor_methods <- c("PCA", "PLS")  # Auto-expands to PCA_grid, PLS_grid
+```
+
+### Factor Spec Structure
+
+Each factor spec has the following fields:
+
+| Field | Values | Description |
+|-------|--------|-------------|
+| `id` | String | Unique identifier (e.g., "PCA_grid", "PLS_ON") |
+| `factor_method` | "PCA", "PLS", "1-PLS" | Factor extraction method |
+| `k_mode` | "grid", "dynamic" | Grid evaluates k=1..k_max; dynamic computes k_hat |
+| `k_rule` | NULL, "bn_bic", "onatski" | Decision rule (only for dynamic mode) |
+| `k_max` | Integer | Maximum k (upper bound for both modes) |
+
+### BN-BIC (Bai-Ng BIC3) for PCA
+
+At each forecast origin t with training data X (T_t × N):
+
+```
+For k in {1, ..., k_max}:
+    V(k) = (1/(N*T_t)) * ||X - X_k||²   # Reconstruction residual variance
+
+σ² = V(k_max)   # Default convention
+
+BIC3(k) = ln(V(k)) + k * σ² * ((N + T_t - k)/(N*T_t)) * ln(N*T_t)
+
+k_hat = argmin BIC3(k), subject to k_hat >= min_k
+```
+
+**Implementation**: Uses single SVD decomposition for efficiency (V(k) computed from cumulative eigenvalues).
+
+### Onatski (2010) for PLS
+
+At each forecast origin t with training data X (T_t × N):
+
+```
+1. Compute eigenvalues λ_1 ≥ ... ≥ λ_N of (1/T_t) X'X
+2. Set r_max = min(config$onatski_r_max, floor((min(N,T_t)-1)/2))
+3. Compute w = 2^(2/3) / (2^(2/3) - 1) ≈ 2.7321
+4. Compute u_hat = w * λ_{r_max+1} + (1-w) * λ_{2*r_max+1}
+5. Compute δ = max(N^{-2/5}, T_t^{-2/5})
+6. Select k_hat = #{i : λ_i > (1+δ) * u_hat}, subject to k_hat >= min_k
+```
+
+**Important**: Onatski eigenvalues are computed on PLS-preprocessed X (same center/scale as PLS extraction) for consistency.
+
+### Output Schema
+
+The enhanced forecast output includes k-selection metadata:
+
+| Column | Description |
+|--------|-------------|
+| `factor_spec_id` | Spec identifier (e.g., "PCA_grid", "PLS_ON") |
+| `k_mode` | "grid" or "dynamic" |
+| `k_selection_rule` | "fixed" for grid; "bn_bic" or "onatski" for dynamic |
+| `k` | Actual k used (1..k_max for grid; k_hat for dynamic) |
+| `training_window_start` | First index in training set |
+| `training_window_end` | Last index in training set |
+
+### Method ID Convention
+
+| Type | Format | Example |
+|------|--------|---------|
+| Grid | `{scheme}_{spec_id}_{model}_k{n}` | `recursive_PCA_grid_DI_k3` |
+| Dynamic | `{scheme}_{spec_id}_{model}` | `recursive_PCA_BNBIC_DI` |
+| AR | `{scheme}_AR` | `recursive_AR` |
+
+**Note**: Dynamic methods have no `_k{n}` suffix because k varies per origin.
+
+### MCS Method Resolution
+
+The `resolve_method_specs()` function supports both old and new formats:
+
+```r
+# Match dynamic BN-BIC methods
+resolve_method_specs("PCA_BNBIC", available_methods, scheme = "recursive")
+# Returns: "recursive_PCA_BNBIC_DI", "recursive_PCA_BNBIC_DIAR", ...
+
+# Match dynamic Onatski methods
+resolve_method_specs("PLS_ON", available_methods, scheme = "rolling")
+# Returns: "rolling_PLS_ON_DI", "rolling_PLS_ON_DIAR", ...
+
+# Match grid methods
+resolve_method_specs("PCA_grid", available_methods, model_class = "DI")
+# Returns: "recursive_PCA_grid_DI_k1", ..., "recursive_PCA_grid_DI_k12"
+```
+
+### Files and Functions
+
+| File | Key Functions |
+|------|---------------|
+| `R/factor_specs.R` | `create_factor_spec()`, `get_factor_specs()`, `validate_factor_specs()` |
+| `R/k_selection.R` | `compute_bn_bic_k()`, `compute_onatski_k()`, `select_k_dynamic()` |
+| `R/forecasting_models.R` | `run_forecasts_for_spec()`, `run_forecasts_for_all_specs()` |
+| `R/evaluation.R` | `compute_evaluation_with_specs()`, `extract_forecasts_from_spec_res()` |
+
 ## Testing
 
 ### Smoke Test
@@ -690,6 +1086,7 @@ config$series_list <- c("INDPRO")
 config$horizons <- c(1)
 config$factor_methods <- c("PCA")
 config$do_tests <- TRUE
+config$save_forecasts <- TRUE  # Default, but explicit for clarity
 
 results <- run_workflow(config)
 evaluation <- compute_evaluation(results, config)
@@ -702,6 +1099,12 @@ stopifnot(all(c("series", "h", "scheme", "model", "mse") %in% names(evaluation$r
 if (!is.null(evaluation$tests_results)) {
   stopifnot(nrow(evaluation$tests_results) > 0)
   stopifnot(all(c("series_id", "test_type", "stat", "p_value_one_sided") %in% names(evaluation$tests_results)))
+}
+
+# Verify forecasts are collected (for MCS analysis)
+if (!is.null(evaluation$forecasts)) {
+  stopifnot(nrow(evaluation$forecasts) > 0)
+  stopifnot(all(c("series_id", "h", "method_id", "y_true", "y_hat") %in% names(evaluation$forecasts)))
 }
 ```
 
@@ -743,6 +1146,15 @@ This runs both optimized and legacy approaches on a small dataset and compares t
 **Issue**: Workflow is taking too long
 - **Solution**: Ensure you're using `compute_evaluation()` instead of separate `compute_rmse()` and `compute_tests()` calls. See the Performance Optimization section.
 
+**Issue**: No forecasts folder in outputs
+- **Solution**: Ensure `config$save_forecasts <- TRUE` (this is the default). Also verify you're using `compute_evaluation()` and passing `forecasts = evaluation$forecasts` to `save_results()`.
+
+**Issue**: MCS results show "skipped" status
+- **Solution**: This occurs when fewer than 2 methods match the M0_set specification. Check that your method patterns correctly match available methods. Use `unique(forecasts$method_id)` to see available method IDs.
+
+**Issue**: MCS drops many rows due to NA
+- **Solution**: MCS requires a balanced panel. If >5% of rows are dropped, you may have missing forecasts for some methods at certain origins. Check that all methods have forecasts at the same origins.
+
 ### Getting Help
 
 - Check debug logs by setting `config$debug <- TRUE`
@@ -761,6 +1173,17 @@ This runs both optimized and legacy approaches on a small dataset and compares t
 
 **Newey, W. K., & West, K. D. (1987)**. A simple, positive semi-definite, heteroskedasticity and autocorrelation consistent covariance matrix. *Econometrica*, 55(3), 703-708.
 - HAC standard errors with Bartlett kernel and lag selection L = h - 1
+
+**Hansen, P. R., Lunde, A., & Nason, J. M. (2011)**. The Model Confidence Set. *Econometrica*, 79(2), 453-497.
+- Model Confidence Set procedure for identifying superior forecasting models
+- Stationary bootstrap for dependent data
+
+**Bai, J., & Ng, S. (2002)**. Determining the number of factors in approximate factor models. *Econometrica*, 70(1), 191-221.
+- Information criteria (IC_p1, IC_p2, IC_p3) for selecting the number of factors
+- BN-BIC (IC_p3) criterion planned for data-driven factor selection
+
+**Politis, D. N., & Romano, J. P. (1994)**. The stationary bootstrap. *Journal of the American Statistical Association*, 89(428), 1303-1313.
+- Stationary bootstrap procedure used in MCS
 
 ## License
 

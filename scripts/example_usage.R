@@ -62,8 +62,17 @@ tests_results <- evaluation$tests_results
 # Display summary
 print_summary(results, rmse_results, config, tests_results)
 
-# Save results (including tests_results.csv, table5_dm.csv, table5_cw.csv if category file provided)
-output_dir <- save_results(results, rmse_results, config, tests_results)
+# Compute MCS evaluation if enabled
+mcs_results <- NULL
+if (isTRUE(config$mcs$enabled) && !is.null(evaluation$forecasts)) {
+  cat("Computing MCS evaluation...\n")
+  mcs_results <- compute_mcs_evaluation(evaluation$forecasts, config)
+}
+
+# Save results (including tests_results.csv, table5_dm.csv, table5_cw.csv, forecasts, mcs_results)
+output_dir <- save_results(results, rmse_results, config, tests_results,
+                           forecasts = evaluation$forecasts,
+                           mcs_results = mcs_results)
 
 cat("\n")
 

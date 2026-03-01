@@ -233,7 +233,9 @@ paper_pls_factors <- function(X, y, k,
 
   # Final orthogonality check: F'F should be approximately diagonal
   F_cross <- crossprod(F_matrix) / T_obs  # k x k, normalized by T
-  off_diagonal <- F_cross - diag(diag(F_cross))
+  # Note: diag(scalar) creates an identity matrix of that size, not a 1x1 matrix.
+  # Use nrow argument to ensure correct dimensions when k = 1.
+  off_diagonal <- F_cross - diag(diag(F_cross), nrow = nrow(F_cross))
   max_off_diag <- max(abs(off_diagonal))
 
   if (verbose || isTRUE(config$debug)) {
