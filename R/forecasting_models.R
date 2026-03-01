@@ -7,9 +7,6 @@
 #' @name forecasting_models
 NULL
 
-# Helper: null-coalescing operator
-`%||%` <- function(x, y) if (is.null(x)) y else x
-
 #' Run forecasts for a single series and horizon
 #'
 #' Performs rolling/recursive forecasting for one target series at one horizon.
@@ -127,7 +124,6 @@ run_forecasts_for_series <- function(series_name,
     out$AR_roll[t_idx] <- predict_AR_at_origin(ar_fit_roll, y_base, t_idx)
 
     # -------- DI --------
-    # TEMPORAL FIX: Pass h and t_idx to enforce t + h <= t_idx constraint
     for (k in 1:k_max_used) {
       di_fit_rec  <- fit_DI(y_h, F_used, k, idx_rec, h = h, t_current = t_idx)
       di_fit_roll <- fit_DI(y_h, F_used, k, idx_roll, h = h, t_current = t_idx)
@@ -139,7 +135,6 @@ run_forecasts_for_series <- function(series_name,
     }
 
     # -------- DIAR --------
-    # TEMPORAL FIX: Pass h and t_idx to enforce t + h <= t_idx constraint
     for (k in 1:k_max_used) {
       diar_fit_rec  <- fit_DIAR_BIC(y_h, y_base, F_used, k, idx_rec, max_p = config$max_p_ar, h = h, t_current = t_idx)
       diar_fit_roll <- fit_DIAR_BIC(y_h, y_base, F_used, k, idx_roll, max_p = config$max_p_ar, h = h, t_current = t_idx)
@@ -151,7 +146,6 @@ run_forecasts_for_series <- function(series_name,
     }
 
     # -------- DIAR-LAG (k <= 4) --------
-    # TEMPORAL FIX: Pass h and t_idx to enforce t + h <= t_idx constraint
     for (k in 1:min(4, k_max_used)) {
       dlag_fit_rec  <- fit_DIARLAG_BIC(y_h, y_base, F_used, k, idx_rec,
                                        max_p = config$max_p_ar, max_m = config$max_m_diarlag, h = h, t_current = t_idx)

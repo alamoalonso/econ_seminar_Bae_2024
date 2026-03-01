@@ -424,7 +424,3 @@ compute_onatski_from_eigenvalues <- function(eigenvalues, r_max = 12L, min_k = 1
   )
 }
 
-# Helper: null-coalescing operator (if not already defined)
-if (!exists("%||%")) {
-  `%||%` <- function(x, y) if (is.null(x)) y else x
-}

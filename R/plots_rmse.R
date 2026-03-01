@@ -262,14 +262,12 @@ plot_mean_rmse_kfactor <- function(rmse_tbl,
 #' @param rmse_tbl Tibble with RMSE results from compute_rmse()
 #' @param metric Character: "rmse_rel" (relative to AR) or "rmse" (absolute)
 #' @param save_dir Character: directory to save the plot
-#' @param run_id Character: optional run identifier for filename (default: NULL uses generic name)
 #' @param filename Character: optional custom filename (default: NULL uses "fig1_mean_rmse_k_pca.png")
 #' @return A ggplot object (invisibly)
 #' @export
 plot_bae_fig1_kpca <- function(rmse_tbl,
                                metric = "rmse_rel",
                                save_dir,
-                               run_id = NULL,
                                filename = NULL,
                                config) {
   
@@ -354,14 +352,12 @@ plot_bae_fig1_kpca <- function(rmse_tbl,
 #' @param rmse_tbl Tibble with RMSE results from compute_rmse()
 #' @param metric Character: "rmse_rel" (relative to AR) or "rmse" (absolute)
 #' @param save_dir Character: directory to save the plot
-#' @param run_id Character: optional run identifier for filename (default: NULL uses generic name)
 #' @param filename Character: optional custom filename (default: NULL uses "fig2_mean_rmse_k_pls.png")
 #' @return A ggplot object (invisibly)
 #' @export
 plot_bae_fig2_kpls <- function(rmse_tbl,
                                metric = "rmse_rel",
                                save_dir,
-                               run_id = NULL,
                                filename = NULL,
                                config) {
   
@@ -401,9 +397,9 @@ plot_bae_fig2_kpls <- function(rmse_tbl,
     rmse_tbl = rmse_tbl,
     factor_method = "PLS",
     metric = metric,
-    schemes = c("recursive", "rolling"),
-    models = c("DI", "DIAR", "DIAR-LAG"),
-    horizons = c(1, 6, 12, 24),
+    schemes = sch,
+    models = mod,
+    horizons = hor,
     save_path = save_path,
     series = NULL,
     width = 10,

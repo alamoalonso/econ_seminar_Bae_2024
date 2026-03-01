@@ -5,11 +5,6 @@
 #' @name evaluation
 NULL
 
-# Null-coalescing operator (define if not already available)
-if (!exists("%||%", mode = "function")) {
-  `%||%` <- function(x, y) if (is.null(x)) y else x
-}
-
 #' Compute MSE
 #'
 #' @param truth Numeric vector of true values

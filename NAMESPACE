@@ -67,7 +67,6 @@ export(compute_mcs_evaluation)
 export(resolve_method_specs)
 export(loss_se)
 export(loss_ae)
-export(select_k_bai_ng)
 
 # Plotting
 export(summarise_mean_rmse_by_k)

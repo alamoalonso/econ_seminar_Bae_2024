@@ -355,5 +355,3 @@ select_k_dynamic <- function(X, k_rule, k_max, config = NULL, context = NULL) {
   result
 }
 
-# Helper: null-coalescing operator
-`%||%` <- function(x, y) if (is.null(x)) y else x

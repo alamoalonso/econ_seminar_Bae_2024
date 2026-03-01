@@ -345,8 +345,7 @@ run_mcs_fallback <- function(L, alpha = 0.10, B = 1000, stat_type = "Tmax",
 #' Converts symbolic method names (like "k1-PLS", "AR", "PCA_BNBIC", "PLS_ON")
 #' to actual method_id patterns that can be matched against the forecasts data.
 #'
-#' Supports both legacy format (factor_method based) and new format (factor_spec_id based):
-#' - Legacy: {scheme}_{factor_method}_{model_class}_k{n} (e.g., recursive_PCA_DI_k3)
+#' Supported formats:
 #' - New grid: {scheme}_{factor_spec_id}_{model_class}_k{n} (e.g., recursive_PCA_grid_DI_k3)
 #' - New dynamic: {scheme}_{factor_spec_id}_{model_class} (e.g., recursive_PCA_BNBIC_DI)
 #'
@@ -371,24 +370,21 @@ resolve_method_specs <- function(method_spec, available_methods, scheme = NULL, 
       }
 
     } else if (grepl("^k([0-9]+)-PLS$", spec)) {
-      # Legacy format: k1-PLS matches both old and new grid format
       k <- sub("^k([0-9]+)-PLS$", "\\1", spec)
       base <- if (!is.null(scheme)) paste0("^", scheme, "_PLS") else "_PLS"
       if (!is.null(model_class)) {
-        # Match both: recursive_PLS_DI_k1 and recursive_PLS_grid_DI_k1
-        pattern <- paste0(base, "(_grid)?_", model_class, "_k", k, "$")
+        pattern <- paste0(base, "_grid_", model_class, "_k", k, "$")
       } else {
-        pattern <- paste0(base, "(_grid)?_.*_k", k, "$")
+        pattern <- paste0(base, "_grid_.*_k", k, "$")
       }
 
     } else if (grepl("^k([0-9]+)-PCA$", spec)) {
-      # Legacy format: k1-PCA matches both old and new grid format
       k <- sub("^k([0-9]+)-PCA$", "\\1", spec)
       base <- if (!is.null(scheme)) paste0("^", scheme, "_PCA") else "_PCA"
       if (!is.null(model_class)) {
-        pattern <- paste0(base, "(_grid)?_", model_class, "_k", k, "$")
+        pattern <- paste0(base, "_grid_", model_class, "_k", k, "$")
       } else {
-        pattern <- paste0(base, "(_grid)?_.*_k", k, "$")
+        pattern <- paste0(base, "_grid_.*_k", k, "$")
       }
 
     } else if (spec == "PCA_BNBIC" || spec == "PCA-BNBIC") {
@@ -709,53 +705,4 @@ compute_mcs_evaluation <- function(forecasts, config) {
   }
 
   mcs_results
-}
-
-# ============================================================================
-# Bai-Ng Information Criteria (Scaffolding for BN-BIC)
-# ============================================================================
-
-#' Compute Bai-Ng Information Criteria for factor number selection
-#'
-#' Implements IC_p1, IC_p2, IC_p3 from Bai & Ng (2002) for selecting
-#' the number of factors. BIC3 (BN-BIC) corresponds to IC_p3.
-#'
-#' @param X Matrix (T x N) of data
-#' @param k_max Maximum number of factors to consider
-#' @param criterion Which criterion: "IC_p1", "IC_p2", "IC_p3" (BN-BIC)
-#' @param config Configuration list for logging
-#' @return List with:
-#'   - k_selected: Selected number of factors
-#'   - IC_values: Vector of IC values for k = 1, ..., k_max
-#'   - criterion: Which criterion was used
-#' @export
-#'
-#' @details
-#' TODO: This is a placeholder implementation. Full implementation requires:
-#' 1. Computing residual variance V(k) = (NT)^{-1} sum_i sum_t (x_it - lambda_i' F_t)^2
-#' 2. Penalty functions:
-#'    - IC_p1: k * (N+T)/(NT) * ln(NT/(N+T))
-#'    - IC_p2: k * (N+T)/(NT) * ln(C_NT^2) where C_NT = min(sqrt(N), sqrt(T))
-#'    - IC_p3: k * ln(C_NT^2) / C_NT^2 (this is BN-BIC / BIC3)
-#' 3. Select k that minimizes IC(k) = ln(V(k)) + penalty(k)
-select_k_bai_ng <- function(X, k_max, criterion = "IC_p3", config = NULL) {
-
-  # TODO: Implement Bai-Ng information criteria
-  # For now, return a warning and use k_max as fallback
-
-  warning("select_k_bai_ng is not yet fully implemented. Using k_max as fallback.")
-
-  T_obs <- nrow(X)
-  N <- ncol(X)
-
-  # Placeholder: compute PCA and get eigenvalues
-  # Real implementation would iterate over k and compute residual variance
-
-  list(
-    k_selected = k_max,
-    IC_values = rep(NA_real_, k_max),
-    criterion = criterion,
-    status = "placeholder",
-    message = "BN-BIC not yet implemented; returning k_max"
-  )
 }

@@ -265,8 +265,6 @@ generate_plots <- function(rmse_results, config) {
     log_warn("No data available for DIAR-LAG plot", config)
   }
 
-  # Additional plots can be added here
-
   invisible(NULL)
 }
 

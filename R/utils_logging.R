@@ -5,6 +5,8 @@
 #' @name utils_logging
 NULL
 
+`%||%` <- function(x, y) if (is.null(x)) y else x
+
 #' Log an informational message
 #'
 #' @param msg Character string to log
